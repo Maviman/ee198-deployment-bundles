@@ -40,3 +40,4 @@ The ESP32 sketch here has PLACEHOLDER WiFi credentials (`YOUR_WIFI_SSID` /
 `YOUR_WIFI_PASSWORD`) — edit before flashing. Real credentials never get
 committed; `sync_from_main.py` sanitizes on every sync and aborts if anything
 credential-shaped survives.
+Deployment target: Jetson Orin (see portable_orin_perception/)

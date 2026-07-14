@@ -13,9 +13,11 @@ What it does:
   - Copies portable_n1_controller/ and portable_orin_perception/ here,
     excluding caches and build output (__pycache__, esp32/.pio, colcon
     build/install/log, generated arena_homography.yaml, .vscode).
-  - SANITIZES WiFi credentials in the ESP32 sketch to placeholders — the real
-    ones live only in the main project. It then scans the whole staged tree
-    and ABORTS if anything credential-shaped survived.
+  - Excludes wifi_credentials.h (the real credentials — gitignored in the
+    main project too; the sketch ships wifi_credentials.h.example instead).
+    Any inline WIFI_* assignment that ever reappears in the sketch is
+    rewritten to a placeholder, then the whole staged tree is scanned and
+    the sync ABORTS if anything credential-shaped survived.
 """
 
 from __future__ import annotations
@@ -30,7 +32,7 @@ DEFAULT_SOURCE = Path(r"G:\Codex\EE198 Senior Prject\AI Training")
 BUNDLES = ["portable_n1_controller", "portable_orin_perception"]
 EXCLUDE_DIRS = {"__pycache__", ".pio", "build", "install", "log", ".vscode",
                 ".pytest_cache"}
-EXCLUDE_FILES = {"arena_homography.yaml"}
+EXCLUDE_FILES = {"arena_homography.yaml", "wifi_credentials.h"}
 
 SKETCH = Path("portable_n1_controller/esp32/esp32_receiver/esp32_receiver.ino")
 CRED_LINES = {
@@ -68,13 +70,15 @@ def main() -> None:
     sketch = dest_root / SKETCH
     if sketch.exists():
         text = sketch.read_text(encoding="utf-8")
+        total = 0
         for pattern, replacement in CRED_LINES.items():
             text, n = pattern.subn(replacement, text)
-            if n == 0:
-                sys.exit(f"expected credential line not found in {SKETCH} — "
-                         "sketch layout changed? Update sync_from_main.py before pushing.")
-        sketch.write_text(text, encoding="utf-8")
-        print(f"sanitized WiFi credentials in {SKETCH}")
+            total += n
+        if total:
+            sketch.write_text(text, encoding="utf-8")
+            print(f"sanitized {total} inline credential line(s) in {SKETCH}")
+        else:
+            print("no inline credentials in sketch (wifi_credentials.h layout)")
 
     leaks = []
     for bundle in BUNDLES:

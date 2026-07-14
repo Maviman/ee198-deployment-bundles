@@ -29,8 +29,10 @@
 #include <ESP32Servo.h>
 
 // ---- EDIT THESE ------------------------------------------------------------
-const char* WIFI_SSID = "YOUR_WIFI_SSID";
-const char* WIFI_PASS = "YOUR_WIFI_PASSWORD";
+// WiFi credentials live in wifi_credentials.h (gitignored, stays local).
+// First build on a new machine: copy wifi_credentials.h.example to
+// wifi_credentials.h and fill in the real network.
+#include "wifi_credentials.h"
 const uint16_t UDP_PORT = 8888;
 
 // ESP32-S3 DevKitC-1: GPIO 25/26 do NOT exist on the S3 (reserved range).

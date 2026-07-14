@@ -1,0 +1,10 @@
+# Which ArUco marker id is which vehicle. Print sheets for these ids are in
+# markers/ (regenerate with tools/generate_aruco_markers.py).
+#
+# Mounting rule (matters!): tape each vehicle marker flat on the car roof with
+# the marker's canonical TOP edge toward the car's NOSE. The detector derives
+# heading from that edge; mounted sideways = heading off by 90 degrees.
+dictionary: DICT_4X4_50
+evader_id: 0
+pursuer_ids: [1, 2, 3]      # slot order: pursuers[0] is P1, etc.
+calibration_corner_ids: [10, 11, 12, 13]

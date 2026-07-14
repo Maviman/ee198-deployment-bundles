@@ -1,0 +1,178 @@
+{
+  "project": {
+    "profile_name": "test_arena_6ft",
+    "version": 1,
+    "notes": "6x6 ft (1.83x1.83 m) IRL integration test arena. Car body dims MEASURED from the purchased test car (7.5x3.5x2 in, 120 g). Speeds/accels/steering/wheelbase are PLACEHOLDERS derived from toy-grade RC norms -- replace via the system-ID pass (known-unknowns register item 2) before trusting absolute timing."
+  },
+  "scene": {
+    "source": "generated_minimal",
+    "isaac_usd_path": "",
+    "arena_width_m": 1.83,
+    "arena_height_m": 1.83,
+    "border_walls_enabled": true,
+    "internal_obstacles": [],
+    "spawn_min_from_evader_floor_m": 0.4,
+    "evader_wall_margin_m": 0.33,
+    "spawn_wall_inset_m": 0.07
+  },
+  "vehicles": {
+    "attackers": {
+      "count": 3,
+      "model": "rc_ackermann_placeholder",
+      "body_length_m": 0.1905,
+      "body_width_m": 0.0889,
+      "wheelbase_m": 0.115,
+      "max_speed_mps": 1.5,
+      "max_reverse_speed_mps": 0.6,
+      "max_steering_angle_deg": 28.0,
+      "max_accel_mps2": 1.5,
+      "max_reverse_accel_mps2": 1.0,
+      "max_brake_mps2": 3.0,
+      "command_latency_s": 0.05
+    },
+    "evader": {
+      "model": "evader_car",
+      "body_length_m": 0.1905,
+      "body_width_m": 0.0889,
+      "wheelbase_m": 0.115,
+      "max_speed_mps": 1.5,
+      "max_reverse_speed_mps": 0.6,
+      "max_accel_mps2": 1.5,
+      "max_reverse_accel_mps2": 1.0,
+      "max_brake_mps2": 3.0,
+      "max_steering_angle_deg": 28.0,
+      "command_latency_s": 0.05,
+      "behavior": "active_evasion"
+    }
+  },
+  "sensing": {
+    "external_runtime_required_for_training": false,
+    "pose_source_note": "structured_state_contract",
+    "birdseye_state_enabled": true,
+    "pov_scalar_detection": {
+      "enabled": true,
+      "classes": [
+        "evader",
+        "teammate",
+        "obstacle",
+        "border"
+      ],
+      "features_per_class": [
+        "visible",
+        "range",
+        "bearing",
+        "confidence"
+      ],
+      "fov_deg": 90.0,
+      "range_m": 1.05,
+      "dropout_probability": 0.0,
+      "noise_std": 0.0
+    },
+    "prediction": {
+      "evader_lead_time_s": 0.16,
+      "include_predicted_evader_position": true
+    }
+  },
+  "controller": {
+    "architecture": "centralized_hive_controller",
+    "coordination_mode": "centralized_joint_action",
+    "policy_inputs": [
+      "birdseye_state",
+      "pov_scalar_detections"
+    ],
+    "action_normalization": "signed_unit",
+    "command_clamp_enabled": true,
+    "notes": "One central controller consumes the full scalar-state observation and emits all attacker commands.",
+    "action_outputs": {
+      "attacker_0": [
+        "throttle",
+        "steering"
+      ],
+      "attacker_1": [
+        "throttle",
+        "steering"
+      ],
+      "attacker_2": [
+        "throttle",
+        "steering"
+      ]
+    }
+  },
+  "training": {
+    "baseline_algorithm": "skrl_mappo",
+    "parallel_envs": 128,
+    "max_iterations": 1000,
+    "rollout_length": 64,
+    "learning_rate": 0.0003,
+    "discount_factor": 0.99,
+    "entropy_scale": 0.01,
+    "checkpoint_interval": 500,
+    "hidden_layers": [
+      384,
+      256,
+      128
+    ]
+  },
+  "analysis": {
+    "frame_io_logging_enabled": true,
+    "frame_io_trace_path": "artifacts/triangle_hive_demo/frame_io/latest_frame_io_trace.jsonl",
+    "frame_io_summary_path": "artifacts/triangle_hive_demo/frame_io/latest_frame_io_summary.json",
+    "learning_review_path": "artifacts/triangle_hive_demo/learning_review/latest_learning_review.json"
+  },
+  "curriculum": {
+    "active_stage": "stage_1_static_evader_no_obstacles",
+    "stages": [
+      {
+        "name": "stage_0_contract_smoke",
+        "purpose": "Validate reset, observation, action, reward, and logging contracts.",
+        "evader_motion": "static",
+        "internal_obstacles_enabled": false,
+        "simultaneous_capture_required": true
+      },
+      {
+        "name": "stage_1_static_evader_no_obstacles",
+        "purpose": "Learn basic three-car approach and simultaneous capture.",
+        "evader_motion": "static",
+        "internal_obstacles_enabled": false,
+        "simultaneous_capture_required": true
+      },
+      {
+        "name": "stage_2_moving_evader_no_obstacles",
+        "purpose": "Learn predictive pursuit against a moving evader.",
+        "evader_motion": "moving_car",
+        "internal_obstacles_enabled": false,
+        "simultaneous_capture_required": true
+      },
+      {
+        "name": "stage_3_borders_and_recovery",
+        "purpose": "Learn border constraints and recovery behavior.",
+        "evader_motion": "moving_car",
+        "internal_obstacles_enabled": false,
+        "simultaneous_capture_required": true
+      },
+      {
+        "name": "stage_4_internal_obstacles",
+        "purpose": "Learn obstacle routing, line-of-sight recovery, and class-aware detections.",
+        "evader_motion": "moving_car",
+        "internal_obstacles_enabled": true,
+        "simultaneous_capture_required": true
+      },
+      {
+        "name": "stage_5_final_moving_car_no_obstacles",
+        "purpose": "Final project objective test.",
+        "evader_motion": "moving_car",
+        "internal_obstacles_enabled": false,
+        "simultaneous_capture_required": true,
+        "evaluation_only": true
+      }
+    ]
+  },
+  "success_metrics": {
+    "capture_radius_m": 0.238,
+    "capture_requires_all_attackers": true,
+    "capture_rate_min": 0.85,
+    "attacker_collision_rate_max": 0.02,
+    "border_contact_rate_max": 0.05,
+    "sight_recovery_required": true
+  }
+}

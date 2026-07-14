@@ -1,0 +1,38 @@
+{
+  "run_id": "n1_reval_flee",
+  "stage": "fleeing_evader",
+  "num_pursuers": 1,
+  "capture_mode": "all",
+  "use_car_cameras": false,
+  "evader_speed_frac": 0.6,
+  "capture_hold_steps": 5,
+  "immobile_speed_mps": 0.5,
+  "require_immobility": true,
+  "init_checkpoint": "G:\\Codex\\EE198 Senior Prject\\AI Training\\artifacts\\single_pursuer\\n1_reval_static\\policy.pt",
+  "reward_weights": {
+    "surround": 12.0,
+    "enclosure": 0.0,
+    "pin": 0.0,
+    "spacing": 0.0,
+    "collision": 6.0
+  },
+  "observation_dim": 20,
+  "algorithm": "skrl_ppo_single_agent",
+  "device": "cuda:0",
+  "use_async_envs": true,
+  "num_envs": 128,
+  "timesteps": 60000,
+  "total_env_steps": 7680000,
+  "rollouts": 512,
+  "checkpoint": "G:\\Codex\\EE198 Senior Prject\\AI Training\\artifacts\\single_pursuer\\n1_reval_flee\\policy.pt",
+  "evaluation": {
+    "episodes": 30,
+    "num_pursuers": 1,
+    "capture_mode": "all",
+    "capture_rate": 1.0,
+    "reward_mean": 191.38677706787882,
+    "final_min_distance_mean": 0.8155357757063353,
+    "collision_episode_rate": 0.0,
+    "mean_steps_to_capture": 55.266666666666666
+  }
+}

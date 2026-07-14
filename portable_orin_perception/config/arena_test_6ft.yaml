@@ -1,0 +1,29 @@
+# 6x6 ft (1.83 x 1.83 m) IRL test arena, matching the main repo's
+# configs/test_arena_6ft.json. Coordinates are ARENA-CENTERED meters:
+# origin at the arena center, +x right, +y up (the training frame).
+#
+# calibration_points: where each calibration marker's CENTER physically sits
+# when you run calibrate_arena. The defaults below are 0.115 m in from each
+# wall (an 80 cm square) so a 10 cm marker fits fully inside the arena —
+# but ANY 4 measured, non-collinear positions work. MEASURE where you actually
+# placed them and EDIT these numbers to match reality; the fit is only as good
+# as these values. Layout as seen from the camera with +y up:
+#
+#     10 -------- 11        id 10 = top-left     (-x, +y)
+#      |          |         id 11 = top-right    (+x, +y)
+#      |  (0,0)   |         id 12 = bottom-right (+x, -y)
+#      |          |         id 13 = bottom-left  (-x, -y)
+#     13 -------- 12
+#
+# Parallax tip (CALIBRATION.md explains): vehicle markers ride on car roofs
+# ~5 cm above the floor. Raising the calibration markers on a jig at that same
+# height removes the ~2-3 cm edge-of-arena skew a floor-level calibration
+# leaves in. Optional — the policy tolerates 5 cm pose noise.
+arena_width_m: 1.83
+arena_height_m: 1.83
+calibration_points:
+  10: [-0.80,  0.80]
+  11: [ 0.80,  0.80]
+  12: [ 0.80, -0.80]
+  13: [-0.80, -0.80]
+marker_height_above_floor_m: 0.0   # set to ~0.05 if you calibrate on a roof-height jig

@@ -1,0 +1,29 @@
+# PLACEHOLDER intrinsics — replace by running the one-time checkerboard
+# calibration (CALIBRATION.md step 1):
+#   ros2 run camera_calibration cameracalibrator --size 8x6 --square 0.025 \
+#       image:=/image_raw camera:=/overhead
+# then copy the resulting YAML over this file (keep camera_name: overhead).
+#
+# Until then: distortion is all zeros, so undistortion is a no-op and poses
+# near the image edges will carry a few cm of lens-distortion error. Fine for
+# bring-up, not for measuring latency/accuracy numbers you plan to report.
+image_width: 1280
+image_height: 720
+camera_name: overhead
+camera_matrix:
+  rows: 3
+  cols: 3
+  data: [1000.0, 0.0, 640.0, 0.0, 1000.0, 360.0, 0.0, 0.0, 1.0]
+distortion_model: plumb_bob
+distortion_coefficients:
+  rows: 1
+  cols: 5
+  data: [0.0, 0.0, 0.0, 0.0, 0.0]
+rectification_matrix:
+  rows: 3
+  cols: 3
+  data: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+projection_matrix:
+  rows: 3
+  cols: 4
+  data: [1000.0, 0.0, 640.0, 0.0, 0.0, 1000.0, 360.0, 0.0, 0.0, 0.0, 1.0, 0.0]

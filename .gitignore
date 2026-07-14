@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.pio/
+.vscode/
+.pytest_cache/
+portable_orin_perception/ros2_ws/build/
+portable_orin_perception/ros2_ws/install/
+portable_orin_perception/ros2_ws/log/
+portable_orin_perception/config/arena_homography.yaml

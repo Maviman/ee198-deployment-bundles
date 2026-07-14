@@ -1,0 +1,11 @@
+{
+  "source_checkpoint": "artifacts\\v1_deployment_candidates\\n1_catch\\policy.pt",
+  "input_dim": 20,
+  "action_dim": 2,
+  "num_pursuers": 1,
+  "use_car_cameras": false,
+  "action_history_k": 0,
+  "verified_max_abs_error_vs_torch": 3.5762786865234375e-07,
+  "opset": 17,
+  "notes": "deterministic mean-action inference path; observations must be built by controller_runtime.observation_adapter (+ action_history_buffer if action_history_k > 0)"
+}

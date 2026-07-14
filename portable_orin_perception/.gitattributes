@@ -1,0 +1,6 @@
+# Shell scripts must land on the Orin with LF endings no matter what Windows
+# git does elsewhere — CRLF in a shebang line breaks bash outright.
+*.sh text eol=lf
+*.py text
+*.yaml text
+*.md text

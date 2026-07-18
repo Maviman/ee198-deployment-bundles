@@ -1,9 +1,12 @@
 # EE198 deployment bundles
 
-Distribution + backup mirror for the two self-contained deployment bundles of
-the EE198 pursuit project (three RC pursuer cars cooperatively corral-and-pin
-an evader, driven by a trained RL policy). Clone this onto a deployment
-machine and each bundle brings itself up — no training repo, no PyTorch.
+Canonical home for the two self-contained deployment bundles of the EE198
+pursuit project (three RC pursuer cars cooperatively corral-and-pin an
+evader, driven by a trained RL policy). Clone this onto a deployment machine
+and each bundle brings itself up — no training repo, no PyTorch.
+
+This is a sibling project to `AI Training` (the training factory / test
+suite / sim stack); edit bundle code directly here.
 
 | Bundle | Runs on | What it does |
 |---|---|---|
@@ -22,22 +25,10 @@ python3 selftest.py        # before installing anything
 ./setup_orin.sh            # installs ROS 2 (Humble/Jazzy by OS) + builds
 ```
 
-## This repo is a mirror
-
-The source of truth is the main `AI Training` project (Jordan's dev machine).
-Never edit bundle code here — change it there (where the test suite lives),
-then refresh this repo:
-
-```
-python sync_from_main.py   # copies bundles, strips WiFi credentials, scans for leaks
-git add -A && git status   # review what changed
-git commit -m "sync bundles from main project" && git push
-```
-
 ## Credentials
 
 The ESP32 sketch here has PLACEHOLDER WiFi credentials (`YOUR_WIFI_SSID` /
-`YOUR_WIFI_PASSWORD`) — edit before flashing. Real credentials never get
-committed; `sync_from_main.py` sanitizes on every sync and aborts if anything
-credential-shaped survives.
-Deployment target: Jetson Orin (see portable_orin_perception/)
+`YOUR_WIFI_PASSWORD`) — edit before flashing, or copy
+`wifi_credentials.h.example` to `wifi_credentials.h` and fill in the real
+values. `wifi_credentials.h` is gitignored — real credentials never get
+committed.

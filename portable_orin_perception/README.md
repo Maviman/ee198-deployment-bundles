@@ -81,6 +81,10 @@ car and watch x/y/heading track reality at ~10 Hz. Sanity: `ros2 topic echo
 `python run_controller.py --model models/n1_catch --source udp --esp
 127.0.0.1:8888`. Cover the camera lens: commands must go silent / E-stop
 within ~0.3 s. This rung + rung 7 are the acceptance tests.
+(You can dry-run this whole rung with zero hardware first —
+`python tools/fake_perception.py --duration 6 --stall 1.2 --resume 3`
+stands in for the Orin, using the same FrameBuilder as the real bridge, and
+exercises the E-stop + re-arm path. Verified green 2026-07-14.)
 
 **7. Latency + clock sync.** `chronyc tracking` on the Orin (offset a few ms),
 then read `capture->arrival` off pose_frame_monitor: target ≤ 50 ms so the

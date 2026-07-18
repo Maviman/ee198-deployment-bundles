@@ -3,6 +3,9 @@ __pycache__/
 .pio/
 .vscode/
 .pytest_cache/
+
+# Local-only credentials (template: wifi_credentials.h.example)
+wifi_credentials.h
 portable_orin_perception/ros2_ws/build/
 portable_orin_perception/ros2_ws/install/
 portable_orin_perception/ros2_ws/log/

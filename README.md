@@ -25,6 +25,11 @@ python3 selftest.py        # before installing anything
 ./setup_orin.sh            # installs ROS 2 (Humble/Jazzy by OS) + builds
 ```
 
+Running BOTH bundles on one Jetson (perception + the AI controller, poses over
+loopback) — the N=1 vs evader test configuration — is the full runbook in
+[ORIN_DEPLOYMENT.md](ORIN_DEPLOYMENT.md), including the policy install/update
+loop from the training repo.
+
 ## Credentials
 
 The ESP32 sketch here has PLACEHOLDER WiFi credentials (`YOUR_WIFI_SSID` /

@@ -26,12 +26,28 @@ authority for its internals (wire formats, dead-man semantics, constraints).
 The Orin gets code by `git clone`/`git pull` only — never edit on the Orin.
 Before every Orin session: commit here, push, pull there.
 
+## Phase 0.5 — Orin, one-time SSH key (repo is private)
+
+GitHub hasn't accepted account passwords for git since 2021, and this repo is
+private, so `https://` clones will prompt then fail. Use SSH instead — set up
+once per Orin (or per SD card / disk image):
+
+```bash
+ls ~/.ssh/id_ed25519.pub 2>/dev/null || ssh-keygen -t ed25519 -C "orin-nano" -f ~/.ssh/id_ed25519 -N ""
+cat ~/.ssh/id_ed25519.pub
+```
+
+Add the printed key at [github.com/settings/keys](https://github.com/settings/keys)
+(New SSH key), then confirm with `ssh -T git@github.com` — expect
+`Hi Maviman! You've successfully authenticated...`. After this, clone/pull with
+the `git@github.com:...` URL, never `https://`.
+
 ## Phase 1 — Orin, zero hardware (no ROS, no camera, no car)
 
 Prove the whole AI side runs on this machine before installing anything heavy.
 
 ```bash
-git clone https://github.com/Maviman/ee198-deployment-bundles.git
+git clone git@github.com:Maviman/ee198-deployment-bundles.git
 cd ee198-deployment-bundles
 
 # Perception math selftest (plain python, no ROS needed)

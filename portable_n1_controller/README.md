@@ -105,8 +105,10 @@ Meters/radians, arena-centered, heading 0 = +x CCW+, `t` = frame CAPTURE time
   both together. `selftest.py` exists to catch exactly this drift.
 - **Sim speeds assume the real car matches the config** (3.1 m/s top speed,
   1.6 m/s² accel, 28° steering). Before trusting closed-loop driving, do a
-  simple system-ID pass on the real car and compare. Cap `THROTTLE_MAX_US` in
-  the sketch for early runs regardless.
+  simple system-ID pass on the real car and compare. Cap the drive power in
+  the sketch for early runs regardless (`THROTTLE_MAX_US` for hobby-ESC
+  hardware, `MAX_DUTY` for the L298N H-bridge variant — see the sketch's own
+  HARDWARE MAPPING comment for which one applies to your car).
 - **The policy uses reverse.** Observed in sim runs: `n1_catch` sometimes
   drives backwards (throttle −1.0) all the way to a capture — the sim treats
   reverse as symmetric with forward. The car's ESC must support smooth

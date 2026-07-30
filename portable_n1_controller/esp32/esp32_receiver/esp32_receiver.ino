@@ -13,20 +13,34 @@
  *
  * Libraries (Arduino IDE -> Library Manager):
  *  - ArduinoJson (Benoit Blanchon)
- *  - ESP32Servo  (Kevin Harrington)  -- drives hobby ESC/servo PWM at 50 Hz
+ *  (ESP32Servo no longer needed -- see HARDWARE MAPPING below.)
  *
- * HARDWARE MAPPING -- EDIT FOR YOUR CAR:
- *  - THROTTLE_PIN -> ESC signal wire, STEER_PIN -> steering servo signal wire.
- *  - Pulse ranges below are typical hobby values (1000-2000 us, 1500 neutral);
- *    calibrate against your ESC/servo before first drive (wheels off ground!).
- *  - Many ESCs need an arming sequence (hold neutral a few seconds at power-on);
- *    this sketch holds neutral from boot, which usually suffices.
+ * HARDWARE MAPPING -- L298N dual H-bridge, NOT a hobby ESC/servo:
+ *  - OUT1/OUT2 -> steering DC motor, driven by IN1/IN2.
+ *  - OUT3/OUT4 -> throttle/drive DC motor, driven by IN3/IN4.
+ *  - ENA/ENB are physically JUMPER-CAPPED on this board (tied permanently
+ *    HIGH) -- both channels are always "enabled" at the H-bridge level, so
+ *    speed control is NOT available through ENA/ENB. Instead we PWM one of
+ *    the two IN pins per channel (chopping that direction's drive voltage)
+ *    and hold the other IN pin LOW; this is a standard, valid technique when
+ *    EN is tied high. Direction is which IN pin carries the PWM.
+ *  - Both motors are plain 2-wire DC motors -- NOT positional servos.
+ *    Steering therefore drives the steering motor at some speed/direction,
+ *    it does not command an absolute wheel angle. If the mechanism doesn't
+ *    self-center, "steer" behaves more like "turn the wheel this way at
+ *    this rate" than a servo's "point the wheel here."
+ *  - SIGN CONVENTION IS UNVERIFIED against physical wiring: which IN pin
+ *    produces "forward"/"left" vs "reverse"/"right" depends on which OUT
+ *    terminal the motor's + lead is on, which we can't know from software.
+ *    If forward/reverse or left/right come out backwards on first test,
+ *    swap the two IN pin arguments in the driveMotor() calls below (or
+ *    physically swap the two wires at OUT1/OUT2 or OUT3/OUT4) -- do not
+ *    assume it's correct without watching it move.
  */
 
 #include <WiFi.h>
 #include <WiFiUdp.h>
 #include <ArduinoJson.h>
-#include <ESP32Servo.h>
 
 // ---- EDIT THESE ------------------------------------------------------------
 // WiFi credentials live in wifi_credentials.h (gitignored, stays local).
@@ -35,46 +49,70 @@
 #include "wifi_credentials.h"
 const uint16_t UDP_PORT = 8888;
 
-// ESP32-S3 DevKitC-1: GPIO 25/26 do NOT exist on the S3 (reserved range).
-// 4 and 5 are safe, freely usable pins on this board's headers.
-const int THROTTLE_PIN = 4;
-const int STEER_PIN    = 5;
+// L298N control pins (ESP32-S3 DevKitC-1: GPIO 25/26 do NOT exist on the S3,
+// avoid that reserved range -- these four are free, safe pins).
+const int STEER_IN1_PIN    = 15;  // steering motor, OUT1
+const int STEER_IN2_PIN    = 16;  // steering motor, OUT2
+const int THROTTLE_IN3_PIN = 6;   // throttle motor, OUT3
+const int THROTTLE_IN4_PIN = 7;   // throttle motor, OUT4
 
-// Pulse widths in microseconds. Start conservative: cap forward throttle low
-// for the first drives by lowering THROTTLE_MAX_US toward 1600.
-const int NEUTRAL_US      = 1500;
-const int THROTTLE_MIN_US = 1000;   // full reverse/brake
-const int THROTTLE_MAX_US = 2000;   // full forward
-const int STEER_MIN_US    = 1000;   // full right (heading convention: +steer = left)
-const int STEER_MAX_US    = 2000;   // full left
+// PWM duty caps, 0-255 scale (analogWrite range). Both motors share ONE motor
+// power rail (the L298N's single 12V-in terminal, currently a 4xAA pack) --
+// under simultaneous load the drive motor's current draw sags that shared
+// rail enough to starve the steering motor. Throttle capped lower than
+// before specifically to leave headroom for steering; this is a mitigation,
+// not a fix -- the real fix is a beefier/lower-impedance power source (or a
+// bulk cap across the motor rail) if steering is still weak after this.
+// Below DEADBAND, both IN pins go LOW (coast/stop) rather than chattering
+// direction at tiny commanded values.
+const int THROTTLE_MAX_DUTY = 70;   // ~27% of 255 (was 115, ~45%)
+const int STEER_MAX_DUTY    = 170;  // ~67% of 255 (was 115, ~45%) -- throttle's
+                                     // cap freed up rail headroom, spending it here
+const double DEADBAND = 0.05;
 // ----------------------------------------------------------------------------
 
 const unsigned long FAILSAFE_TIMEOUT_MS = 300;  // matches tools/mock_esp.py
 
 WiFiUDP udp;
-Servo throttleOut;
-Servo steerOut;
 long lastSeq = -1;
 unsigned long lastPacketMs = 0;
 bool failsafeActive = true;
 char packetBuf[512];
 
-int mapNormalized(double v, int minUs, int maxUs) {
-  if (v < -1.0) v = -1.0;
-  if (v >  1.0) v =  1.0;
-  return (int)(NEUTRAL_US + v * ((v >= 0 ? maxUs : minUs) - NEUTRAL_US) * (v >= 0 ? 1.0 : -1.0));
+// Drive one L298N channel from a normalized [-1, 1] command: PWMs whichever
+// IN pin corresponds to the commanded direction, holds the other LOW. Both
+// LOW inside the deadband (coast/stop) -- see HARDWARE MAPPING for why PWM
+// lands on the IN pins instead of ENA/ENB.
+void driveMotor(int pinA, int pinB, double normalized, int maxDuty) {
+  if (normalized > 1.0) normalized = 1.0;
+  if (normalized < -1.0) normalized = -1.0;
+  if (fabs(normalized) < DEADBAND) {
+    analogWrite(pinA, 0);
+    analogWrite(pinB, 0);
+    return;
+  }
+  int duty = (int)(fabs(normalized) * maxDuty);
+  if (normalized > 0) {
+    analogWrite(pinA, duty);
+    analogWrite(pinB, 0);
+  } else {
+    analogWrite(pinA, 0);
+    analogWrite(pinB, duty);
+  }
 }
 
 void goNeutral() {
-  throttleOut.writeMicroseconds(NEUTRAL_US);
-  steerOut.writeMicroseconds(NEUTRAL_US);
+  driveMotor(THROTTLE_IN3_PIN, THROTTLE_IN4_PIN, 0.0, THROTTLE_MAX_DUTY);
+  driveMotor(STEER_IN1_PIN, STEER_IN2_PIN, 0.0, STEER_MAX_DUTY);
 }
 
 void setup() {
   Serial.begin(115200);
-  throttleOut.attach(THROTTLE_PIN, THROTTLE_MIN_US, THROTTLE_MAX_US);
-  steerOut.attach(STEER_PIN, STEER_MIN_US, STEER_MAX_US);
-  goNeutral();  // hold neutral from boot: safe + arms most ESCs
+  pinMode(STEER_IN1_PIN, OUTPUT);
+  pinMode(STEER_IN2_PIN, OUTPUT);
+  pinMode(THROTTLE_IN3_PIN, OUTPUT);
+  pinMode(THROTTLE_IN4_PIN, OUTPUT);
+  goNeutral();  // hold stopped from boot
 
   WiFi.mode(WIFI_STA);
   // Power-save OFF: with it on, the radio naps between router beacons and
@@ -120,8 +158,8 @@ void loop() {
         } else {
           double thr = doc["cmd"][0][0] | 0.0;
           double str = doc["cmd"][0][1] | 0.0;
-          throttleOut.writeMicroseconds(mapNormalized(thr, THROTTLE_MIN_US, THROTTLE_MAX_US));
-          steerOut.writeMicroseconds(mapNormalized(str, STEER_MIN_US, STEER_MAX_US));
+          driveMotor(THROTTLE_IN3_PIN, THROTTLE_IN4_PIN, thr, THROTTLE_MAX_DUTY);
+          driveMotor(STEER_IN1_PIN, STEER_IN2_PIN, str, STEER_MAX_DUTY);
           failsafeActive = false;
         }
       }  // else: stale/duplicate packet, not applied (still ACKed below)

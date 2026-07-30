@@ -23,10 +23,14 @@ case "${UBUNTU_VER}" in
     24.04) ROS_DISTRO=jazzy ;;
     *) echo "Unsupported Ubuntu ${UBUNTU_VER}"; exit 1 ;;
 esac
+# ROS 2's setup.bash references unset variables internally (e.g.
+# AMENT_TRACE_SETUP_FILES) and isn't nounset-safe — relax -u just for sourcing.
+set +u
 # shellcheck disable=SC1090
 source "/opt/ros/${ROS_DISTRO}/setup.bash"
 # shellcheck disable=SC1091
 source "ros2_ws/install/setup.bash"
+set -u
 
 export HIVE_PERCEPTION_ROOT="$(pwd)"
 exec ros2 launch hive_perception perception.launch.py \

@@ -33,19 +33,26 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("expected_pursuers", default_value="1"),
         DeclareLaunchArgument("video_device", default_value="/dev/video0"),
         DeclareLaunchArgument("send_rate_hz", default_value="10.0"),
+        # Safety dead-man cutoff (default matches the documented 0.25s hard
+        # constraint — do not raise this for anything but a wheels-off,
+        # confirm-the-wiring run; revert once real end-to-end latency is fixed).
+        DeclareLaunchArgument("hold_max_age_s", default_value="0.25"),
 
-        # Camera. pixel_format mjpeg2rgb keeps 720p30 inside USB2 bandwidth;
-        # if your usb_cam build rejects it, try raw_mjpeg or yuyv (yuyv may cap
-        # at ~10-15 fps at 720p — still enough for the 10 Hz contract).
+        # Camera. 640x480@15 chosen so aruco_detector (pure-CPU, no GPU accel)
+        # can actually keep up in real time on this hardware — 1280x720 was
+        # measured pegging aruco_detector at ~150% CPU with frames queueing
+        # 0.5-0.9s stale, permanently tripping the 0.25s dead-man even with
+        # clean detections. Must match calibrate_arena.sh's --width/--height
+        # (and re-run calibration) if you change this.
         Node(
             package="usb_cam",
             executable="usb_cam_node_exe",
             name="overhead_camera",
             parameters=[{
                 "video_device": LaunchConfiguration("video_device"),
-                "image_width": 1280,
-                "image_height": 720,
-                "framerate": 30.0,
+                "image_width": 640,
+                "image_height": 480,
+                "framerate": 15.0,
                 "pixel_format": "mjpeg2rgb",
                 "camera_name": "overhead",
                 "camera_info_url": "file://" + os.path.join(config, "camera_info.yaml"),
@@ -79,6 +86,7 @@ def generate_launch_description() -> LaunchDescription:
                 "controller_port": LaunchConfiguration("controller_port"),
                 "expected_pursuers": LaunchConfiguration("expected_pursuers"),
                 "send_rate_hz": LaunchConfiguration("send_rate_hz"),
+                "hold_max_age_s": LaunchConfiguration("hold_max_age_s"),
             }],
         ),
     ])

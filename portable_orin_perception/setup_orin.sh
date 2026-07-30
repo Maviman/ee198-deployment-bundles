@@ -64,8 +64,12 @@ echo "== [5/6] rosdep =="
 rosdep update || true
 
 echo "== [6/6] Building the workspace =="
+# ROS 2's setup.bash references unset variables internally (e.g.
+# AMENT_TRACE_SETUP_FILES) and isn't nounset-safe — relax -u just for sourcing.
+set +u
 # shellcheck disable=SC1090
 source "/opt/ros/${ROS_DISTRO}/setup.bash"
+set -u
 (cd ros2_ws && colcon build --symlink-install)
 
 echo

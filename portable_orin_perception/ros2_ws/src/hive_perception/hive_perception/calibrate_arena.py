@@ -75,12 +75,17 @@ def collect_marker_centers(images, dictionary_name: str, wanted_ids: list[int],
     return centers
 
 
-def grab_frames(device: str, count: int) -> list[np.ndarray]:
+def grab_frames(device: str, count: int, width: int, height: int) -> list[np.ndarray]:
     import cv2
 
     cap = cv2.VideoCapture(int(device) if device.isdigit() else device)
     if not cap.isOpened():
         sys.exit(f"could not open camera device {device!r}")
+    # Must match the live pipeline's resolution (perception.launch.py sets
+    # image_width/image_height explicitly) — a homography fitted at one
+    # resolution is invalid pixel geometry at another, even same aspect ratio.
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
     frames = []
     while len(frames) < count:
         ok, frame = cap.read()
@@ -100,6 +105,10 @@ def main(argv=None) -> None:
     src.add_argument("--device", help="camera device (index like 0, or /dev/video0)")
     src.add_argument("--image", help="calibrate from a saved image instead of a live camera")
     parser.add_argument("--frames", type=int, default=10, help="frames to average over (live mode)")
+    parser.add_argument("--width", type=int, default=640,
+                        help="capture width — MUST match perception.launch.py's image_width")
+    parser.add_argument("--height", type=int, default=480,
+                        help="capture height — MUST match perception.launch.py's image_height")
     parser.add_argument("--arena-config", default="config/arena_test_6ft.yaml")
     parser.add_argument("--marker-map", default="config/marker_map.yaml")
     parser.add_argument("--camera-info", default="config/camera_info.yaml")
@@ -121,7 +130,7 @@ def main(argv=None) -> None:
         if images[0] is None:
             sys.exit(f"could not read image {args.image!r}")
     else:
-        images = grab_frames(args.device, args.frames)
+        images = grab_frames(args.device, args.frames, args.width, args.height)
     print(f"collected {len(images)} frame(s) at {images[0].shape[1]}x{images[0].shape[0]}")
 
     centers = collect_marker_centers(images, marker_map.dictionary, corner_ids)

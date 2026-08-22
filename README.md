@@ -1,39 +1,82 @@
 # EE198 deployment bundles
 
-Canonical home for the two self-contained deployment bundles of the EE198
-pursuit project (three RC pursuer cars cooperatively corral-and-pin an
-evader, driven by a trained RL policy). Clone this onto a deployment machine
-and each bundle brings itself up — no training repo, no PyTorch.
+RC cars chase an evader inside a marked arena, driven by a trained RL policy.
+This repo is what actually runs on the hardware — no training repo, no PyTorch.
 
-This is a sibling project to `AI Training` (the training factory / test
-suite / sim stack); edit bundle code directly here.
-
-| Bundle | Runs on | What it does |
-|---|---|---|
-| [`portable_n1_controller/`](portable_n1_controller/) | the controller PC | Runs the frozen N=1 pursuit policy (ONNX): pose frames in (UDP :9870) → throttle/steer commands out to the car's ESP32 (UDP :8888, ACK + failsafe). Includes the ESP32-S3 firmware and mock/link-test tools. Hardware-verified 2026-07-06/07. |
-| [`portable_orin_perception/`](portable_orin_perception/) | Jetson Orin | ROS 2 + ArUco overhead perception: USB webcam → marker poses in arena meters → UDP pose frames for the controller. One-script setup (`setup_orin.sh`), zero-hardware `selftest.py`, calibration tooling, printable markers. |
-
-Start with each bundle's own README (bring-up ladders, wire formats, hard
-constraints). New to ROS 2: `portable_orin_perception/ROS2_LEARNING.md`.
-
-## Quick start on the Orin
+## How it works
 
 ```
-git clone <this-repo>
+  overhead camera
+        │
+        ▼
+  ArUco perception  ──── pose frames ────►  pursuit policy (ONNX)
+   (Jetson Orin)          UDP :9870              │
+                                                 │ throttle / steer
+                                                 ▼  UDP :8888
+                                          ESP32 on the car
+                                                 │
+                                    ┌────────────┴────────────┐
+                                    ▼                         ▼
+                            L298N H-bridge            steering servo
+                          7.4 V drive motor
+```
+
+A camera finds each car, the policy decides where to go, the ESP32 drives the
+motors. Every hop has a failsafe: if poses stop arriving, or commands stop
+arriving, the car stops on its own.
+
+## The two bundles
+
+**[`portable_orin_perception/`](portable_orin_perception/)** — runs on the
+Jetson Orin. Webcam → ArUco marker detection → car positions in arena meters,
+sent to the controller as UDP pose frames. Includes calibration tooling and
+printable markers.
+
+**[`portable_n1_controller/`](portable_n1_controller/)** — runs the policy.
+Pose frames in, throttle/steer commands out to the car. Also holds the ESP32
+firmware and the mock/link-test tools you use before touching real hardware.
+
+Both are self-contained: clone, run the selftest, bring it up.
+
+## Start here
+
+```bash
+git clone git@github.com:Maviman/ee198-deployment-bundles.git
 cd ee198-deployment-bundles/portable_orin_perception
-python3 selftest.py        # before installing anything
-./setup_orin.sh            # installs ROS 2 (Humble/Jazzy by OS) + builds
+python3 selftest.py        # run this before installing anything
+./setup_orin.sh            # installs ROS 2 + builds
 ```
 
-Running BOTH bundles on one Jetson (perception + the AI controller, poses over
-loopback) — the N=1 vs evader test configuration — is the full runbook in
-[ORIN_DEPLOYMENT.md](ORIN_DEPLOYMENT.md), including the policy install/update
-loop from the training repo.
+Then follow the bring-up ladder in whichever bundle you're working on — each
+README walks from "no hardware at all" up to "real car, wheels off the ground."
 
-## Credentials
+| If you want to… | Read |
+|---|---|
+| Run both bundles on one Jetson (the demo runbook) | [ORIN_DEPLOYMENT.md](ORIN_DEPLOYMENT.md) |
+| Get the camera calibrated fast | [ORIN_QUICKSTART.md](ORIN_QUICKSTART.md) |
+| Learn the ROS 2 concepts this uses | [ROS2_LEARNING.md](portable_orin_perception/ROS2_LEARNING.md) |
+| Know what's planned and what's blocked | [HANDOFF.md](HANDOFF.md) |
 
-The ESP32 sketch here has PLACEHOLDER WiFi credentials (`YOUR_WIFI_SSID` /
-`YOUR_WIFI_PASSWORD`) — edit before flashing, or copy
-`wifi_credentials.h.example` to `wifi_credentials.h` and fill in the real
-values. `wifi_credentials.h` is gitignored — real credentials never get
-committed.
+## Before you flash the ESP32
+
+The sketch needs WiFi credentials, and they must never be committed. Copy the
+template and fill in your network:
+
+```bash
+cd portable_n1_controller/esp32/esp32_receiver
+cp wifi_credentials.h.example wifi_credentials.h
+```
+
+`wifi_credentials.h` is gitignored.
+
+## Known limits
+
+Two things will bite you if you don't know them going in:
+
+- **The arena is part of the model.** The policies were trained in a 14 × 10 m
+  arena and the observation scaling bakes that in. A different real arena size
+  means retraining, not just a config edit.
+- **Perception is at its resolution limit.** At 640×480 the 7 cm car markers
+  land around 24 px — right at the ArUco detection floor. Making the arena
+  bigger needs more than a wider lens. [HANDOFF.md](HANDOFF.md) has the
+  measurements and the options.

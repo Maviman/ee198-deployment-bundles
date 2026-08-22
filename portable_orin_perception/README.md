@@ -108,6 +108,46 @@ whole camera→policy→radio loop stays inside its hard 100 ms budget.
 - **Policies are arena-specific.** Live capture demos at the 6 ft test arena
   need the main repo's arena-scale retraining first; perception itself is
   arena-agnostic once calibrated.
+- **Resolution is capped by marker pixels, not by the lens.** At 640×480 the
+  7 cm vehicle markers land around 24 px — right at the ArUco detection floor.
+  Raising resolution to see more arena runs straight into the CPU ceiling
+  below. See [HANDOFF.md](../HANDOFF.md).
+
+## Performance: read this before optimizing
+
+The camera runs at **640×480 @ 15 fps** for a reason, recorded in
+`perception.launch.py`: 1280×720 pegged `aruco_detector` at ~150% CPU with
+frames queueing 0.5–0.9 s stale, permanently tripping the 0.25 s dead-man even
+with clean detections.
+
+**The GPU cannot fix this, and it is worth knowing that before you try.**
+Measured on the Orin Nano, 2026-08-21:
+
+| Stage | 640×480 | 1280×720 | GPU path? |
+|---|---|---|---|
+| MJPEG decode (`mjpeg2rgb`) | 2.8 ms | 7.5 ms | yes — NVJPEG/VPI |
+| `cvtColor` BGR→GRAY | 0.1 ms | 0.3 ms | yes, but ~1% of the frame |
+| `detectMarkers` | 12.2 ms | 34.0 ms | **no — CPU-only** |
+
+OpenCV's ArUco module has no CUDA implementation in any build, and it is ~80%
+of the frame. Neither installed OpenCV (pip 4.10.0, distro 4.6.0) has CUDA at
+all, and `onnxruntime` here is CPU-only. Policy inference is 0.050 ms/call —
+too small for GPU offload to be anything but overhead.
+
+What actually helps, roughly in order of cost:
+
+- `jetson_clocks` — the board sits in `MAXN_SUPER` but with the `schedutil`
+  governor at 1.19 of 1.73 GHz, and identical work varied ~60% run to run.
+  Does not persist across reboot.
+- Tuning `DetectorParameters` against the known marker size (measured
+  1.16–1.48× on synthetic frames).
+- Avoiding the CPU MJPEG decode.
+- NVIDIA's cuAprilTag (`isaac_ros_apriltag`) is the one genuine GPU detector —
+  but it is AprilTag 36h11, not ArUco, so it means reprinting every marker.
+  Decided direction, not yet started; scoped in [HANDOFF.md](../HANDOFF.md).
+
+Numbers are from synthetic frames — treat them as relative weights. Real arena
+clutter makes `detectMarkers` worse, not better.
 
 ## Provenance
 

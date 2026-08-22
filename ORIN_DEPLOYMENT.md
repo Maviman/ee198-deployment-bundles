@@ -127,7 +127,7 @@ Acceptance checks before wheels touch the ground, in order:
    capture→arrival off pose_frame_monitor (target ≤ 50 ms) and keep the ESP
    RTT numbers from `tools/link_test.py` in budget.
 4. **First driving session** stays wheels-off, per
-   `portable_n1_controller/README.md` rung 2 (capped `THROTTLE_MAX_US`,
+   `portable_n1_controller/README.md` rung 2 (capped `THROTTLE_MAX_DUTY`,
    failsafe pull-test), with real WiFi credentials in `wifi_credentials.h`
    (gitignored — set on the flashing machine, never committed).
 

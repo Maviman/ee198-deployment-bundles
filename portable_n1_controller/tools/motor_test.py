@@ -1,8 +1,8 @@
-"""Direct motor/servo test: bypasses perception AND the policy entirely, sends
-a fixed step sequence of throttle/steer commands straight to the ESP. For
-answering one question in isolation: does the drive motor (and steering
-servo) actually respond to commands at all, independent of whether the
-perception/policy pipeline is healthy right now.
+"""Direct actuator test: bypasses perception AND the policy entirely, sends a
+fixed step sequence of throttle/steer commands straight to the ESP. For
+answering one question in isolation: do the drive motor (L298N H-bridge) and
+the steering servo actually respond to commands at all, independent of whether
+the perception/policy pipeline is healthy right now.
 
 Unlike tools/link_test.py (deliberately zero-throttle, comms-only), this DOES
 command the drive motor. Sends steadily at 10 Hz throughout (matching the
@@ -12,6 +12,18 @@ one thing this tool exists to isolate.
 
     python tools/motor_test.py --esp 192.168.1.194:8888
     python tools/motor_test.py --esp 192.168.1.194:8888 --throttle 0.5 --hold 2.0
+
+What to watch for, since neither sign convention is knowable from software:
+
+- "forward" really drives forward. If it's backwards, swap the driveMotor()
+  IN-pin arguments in the sketch (or the wires at L298N OUT3/OUT4).
+- "steer left" really goes left. If it's mirrored, swap STEER_MIN_US and
+  STEER_MAX_US in the sketch.
+- Every "neutral" step returns the wheels to actually straight. If they sit
+  off-center, that's STEER_CENTER_US trim, not a wiring fault.
+- The servo does not buzz or strain at either extreme -- that means the
+  commanded throw is driving the linkage into its mechanical stop, and the
+  stalled servo can brown out the ESP32. Narrow STEER_MIN_US/STEER_MAX_US.
 
 SAFETY: wheels OFF the ground for this. Default throttle magnitude is a
 gentle 0.3 (normalized) -- raise with --throttle only once 0.3 is confirmed

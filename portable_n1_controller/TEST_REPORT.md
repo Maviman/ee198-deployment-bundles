@@ -2,6 +2,16 @@
 
 **Date:** 2026-07-06/07 &nbsp;|&nbsp; **Bundle:** `portable_n1_controller/` &nbsp;|&nbsp; **Status: ALL TESTS PASSED**
 
+> **⚠ Historical record — the car hardware has changed since this run.**
+> This documents the V1 car: a hobby ESC + servo driven by the ESP32Servo
+> library on GPIO 4/5. The car is now V2 — a 7.4 V brushed motor on an L298N
+> H-bridge (GPIO 6/7) plus a steering servo on raw LEDC (GPIO 5), and the
+> ESP32Servo dependency is gone. The comms, latency, and golden-vector results
+> below still stand; **anything describing motor or servo wiring does not.**
+> Kept unedited as evidence of what was actually tested on those dates. The
+> "not yet tested" list at the bottom needs a fresh bench run against current
+> firmware before it can be used as a checklist.
+
 Test PC: Windows 11, Python 3.11 (conda `env_isaaclab`), onnxruntime 1.27.0.
 Target hardware: Espressif ESP32-S3-DevKitC-1 (micro-USB revision), flashed via
 CP2102N UART bridge on COM8.

@@ -10,7 +10,8 @@ Packet format (one JSON object per UDP datagram, newline-terminated):
 - estop: when true the ESP must go to neutral immediately regardless of cmd.
 - cmd: one [throttle, steer] pair per pursuer, each normalized to [-1, 1]
   (SinglePursuerEnv's action layout: +throttle forward, +steer left).
-  N=1 -> a single pair. The ESP maps these to ESC/servo pulse widths.
+  N=1 -> a single pair. The ESP maps throttle to L298N H-bridge PWM and steer
+  to a steering-servo pulse width.
 
 Failsafe contract (implemented ESP-side, see esp32/esp32_receiver): if no packet
 arrives for FAILSAFE_TIMEOUT_MS the ESP goes to neutral on its own -- the PC does

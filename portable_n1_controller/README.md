@@ -21,7 +21,7 @@ python selftest.py                  # must print SELFTEST PASSED before anything
 | `run_controller.py` | Main entry point (see below). |
 | `selftest.py` + `reference_vectors.json` | Golden-vector health check: proves the vendored contract + models on this machine reproduce the outputs frozen at bundle creation. |
 | `tools/mock_esp.py` | Fake ESP32 for testing the full PC side with zero hardware. |
-| `esp32/esp32_receiver/` | Arduino sketch for the real ESP32 (WiFi UDP → ESC/servo PWM, with failsafe). |
+| `esp32/esp32_receiver/` | Arduino sketch for the real ESP32 (WiFi UDP → L298N drive-motor PWM + steering-servo PWM, with failsafe). |
 
 ## Which model?
 
@@ -50,8 +50,20 @@ the controller terminal and ~10 pkt/s with sane throttle/steer in the mock ESP.
 **2. Real ESP32, wheels off the ground.** Edit WiFi credentials + pins in
 `esp32/esp32_receiver/esp32_receiver.ino`, flash it, read its IP off the serial
 monitor, then re-run step 1 with `--esp <esp-ip>:8888`. The sim episode now
-physically twitches the real servo/ESC. Unplug the network mid-run to watch the
-300 ms failsafe drop it to neutral.
+physically twitches the real steering servo and drive motor. Unplug the network
+mid-run to watch the 300 ms failsafe drop it to neutral.
+
+The car's two channels run on different hardware — the sketch's own HARDWARE
+MAPPING comment is the authority on wiring, but in summary:
+
+| Channel | Hardware | ESP32 pins |
+|---|---|---|
+| throttle | 7.4 V brushed DC motor via L298N H-bridge (OUT3/OUT4) | IN3 = GPIO 6, IN4 = GPIO 7 |
+| steer | 3-wire positional hobby servo, signalled and powered off the ESP32 | signal = GPIO 5 |
+
+ESP32 and L298N grounds must be common. Neither sign convention
+(forward/reverse, left/right) is knowable from software — watch the first
+motion and invert as the sketch describes if either comes out backwards.
 
 **3. Real perception.** When the overhead-camera ArUco pipeline exists, have it
 send pose frames (format below) and run:
@@ -106,14 +118,20 @@ Meters/radians, arena-centered, heading 0 = +x CCW+, `t` = frame CAPTURE time
 - **Sim speeds assume the real car matches the config** (3.1 m/s top speed,
   1.6 m/s² accel, 28° steering). Before trusting closed-loop driving, do a
   simple system-ID pass on the real car and compare. Cap the drive power in
-  the sketch for early runs regardless (`THROTTLE_MAX_US` for hobby-ESC
-  hardware, `MAX_DUTY` for the L298N H-bridge variant — see the sketch's own
-  HARDWARE MAPPING comment for which one applies to your car).
+  the sketch for early runs regardless: `THROTTLE_MAX_DUTY` ships deliberately
+  gentle, and is the first thing to re-tune wheels-off after any change to the
+  motor, battery, or gearing.
 - **The policy uses reverse.** Observed in sim runs: `n1_catch` sometimes
   drives backwards (throttle −1.0) all the way to a capture — the sim treats
-  reverse as symmetric with forward. The car's ESC must support smooth
-  proportional reverse (crawler-style ESC, no double-tap-to-reverse lockout),
-  or the real car will behave very differently from sim.
+  reverse as symmetric with forward. The L298N H-bridge satisfies this
+  natively (no double-tap-to-reverse lockout the way a toy ESC has); what to
+  verify on the real car is that forward and reverse are actually *symmetric*
+  in speed, since the sim assumes they are.
+- **Steering is positional now.** The servo holds a commanded wheel angle, so
+  `steer` maps to an angle rather than a turn *rate*. Keep the servo throw
+  inside where the linkage physically binds (`STEER_MIN_US`/`STEER_MAX_US`) —
+  a servo stalled against its stop draws its full stall current off the
+  ESP32's 5V rail and can brown the board out mid-run.
 
 ## Provenance
 

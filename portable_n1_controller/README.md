@@ -84,13 +84,74 @@ ignores `seq` ≤ last applied, goes neutral on `estop` or a 300 ms stream stall
 
 **ESP → PC delivery confirmation** (reply to every parseable packet):
 ```json
-{"ack": 42, "applied": true, "rssi": -55}
+{"ack": 42, "car": 0, "applied": true, "slot": true, "rssi": -55}
 ```
-`applied` is false when the packet was dropped as stale; `rssi` is the ESP's
-WiFi signal in dBm (> −70 good, < −80 expect trouble). Verify the link any time
-with `python tools/link_test.py --esp <ip>:8888` — it reports per-packet
-delivery, round-trip time, loss, and signal strength (safe on a live car: zero
-throttle, gentle steering sweep — but first runs wheels-off anyway).
+`car` is the reporting board's CAR_INDEX (see below); `applied` is false when
+the packet was dropped as stale; `slot` is false when the packet carried no
+command at this car's index; `rssi` is the ESP's WiFi signal in dBm (> −70 good,
+< −80 expect trouble). Verify the link any time with
+`python tools/link_test.py --esp <ip>:8888` — it reports per-packet delivery,
+round-trip time, loss, and signal strength (safe on a live car: zero throttle,
+gentle steering sweep — but first runs wheels-off anyway).
+
+## Multiple cars: CAR_INDEX
+
+The policy is **centralised** — one forward pass emits `2N` values, the joint
+action for the whole fleet. So the controller unicasts the **same** packet to
+every car, and each ESP picks its own pair out of `cmd[]` using the CAR_INDEX
+stored on that board:
+
+| CAR_INDEX | drives | = policy slot | = marker_map |
+|---|---|---|---|
+| 0 | `cmd[0]` | pursuer 0 | `pursuer_ids[0]` |
+| 1 | `cmd[1]` | pursuer 1 | `pursuer_ids[1]` |
+| … | | | |
+
+**Setup, per car.** Flash every board with the same sketch, then give each one a
+different index over the serial monitor (persists in NVS, survives reflash):
+
+```
+index        → prints the current index
+index 1      → sets this car to index 1 and saves
+```
+
+The index is printed loudly at boot and echoed in every ACK, because two cars
+sharing an index is otherwise invisible: both obey the same command while one
+slot goes undriven.
+
+**Running the fleet.** Addresses go in CAR_INDEX order — the first address is
+the car flashed as index 0:
+
+```bash
+python run_controller.py --model <N-pursuer model> --source udp \
+    --esp 192.168.4.10:8888,192.168.4.11:8888,192.168.4.12:8888
+```
+
+Start-up refuses to run if you list more cars than the model drives, and warns
+if you list fewer. `tools/link_test.py` takes the same list and reports **per
+car**, so "which radio is worst" is answerable; an ACK from an index outside the
+fleet is flagged explicitly.
+
+**No hardware?** Run one mock per car on different ports:
+
+```bash
+python tools/mock_esp.py --index 0 --port 8888
+python tools/mock_esp.py --index 1 --port 8889
+python run_controller.py --model <2-pursuer model> --esp 127.0.0.1:8888,127.0.0.1:8889
+```
+
+**Safety note, new at N > 1.** The 300 ms failsafe is *per car*. One car can drop
+to neutral while the others keep driving a formation that no longer exists — and
+the policy has no concept of a stalled teammate, since a failsafed car still
+reports a valid (stationary) pose. Whether a single-car failsafe should escalate
+to a fleet-wide stop is an open design decision, not something the current code
+does. A car that receives no command at its own index goes neutral **and** lets
+the normal failsafe engage, so "no command" and "no link" look identical rather
+than being two subtly different states.
+
+Unicast, not broadcast: 802.11 broadcast frames get no MAC-layer retries and go
+out at the lowest basic rate, which would trade reliability for airtime the link
+does not need. Three cars at 10 Hz is ~5.5 kB/s and ~6% airtime.
 
 **Perception → PC pose frame** (UDP :9870, one JSON per datagram):
 ```json

@@ -3,13 +3,35 @@
  *
  * Listens on UDP port 8888 for JSON command packets from run_controller.py:
  *   {"seq": 42, "t": 1720300000.123, "estop": false, "cmd": [[0.43, -0.10]]}
- * cmd[0] = [throttle, steer], each normalized to [-1, 1]
- * (+throttle = forward, +steer = left -- the policy's training convention).
+ * cmd[i] = [throttle, steer] for the car whose CAR INDEX is i, each normalized
+ * to [-1, 1] (+throttle = forward, +steer = left -- the policy's training
+ * convention).
+ *
+ * CAR INDEX -- WHICH CAR AM I? (read this before flashing a second car)
+ *  The controller is centralised: it emits the whole fleet's joint action in
+ *  one packet and unicasts that SAME packet to every car. Each board therefore
+ *  has to pick its own pair out of cmd[], and it does that by CAR INDEX:
+ *    index 0 -> cmd[0]   (policy pursuer slot 0, marker_map pursuer_ids[0])
+ *    index 1 -> cmd[1]   ... and so on.
+ *  Flash every car with this same sketch, then give each one a DIFFERENT index.
+ *  Two cars sharing an index both obey the same command and one car's slot is
+ *  never driven -- so the index is echoed in every ACK and printed at boot,
+ *  making the mistake visible instead of silent.
+ *
+ *  Set it over serial (persists in NVS, survives reflash):
+ *    index        -> print the current index
+ *    index 2      -> set this car to index 2 and save
+ *  Or set DEFAULT_CAR_INDEX below / -D DEFAULT_CAR_INDEX=n as a build flag; the
+ *  stored value wins once one has ever been set.
  *
  * SAFETY CONTRACT (do not weaken):
  *  - If no packet arrives for FAILSAFE_TIMEOUT_MS -> both channels to neutral.
  *  - estop:true -> neutral immediately, regardless of cmd.
  *  - Packets with seq <= the last applied seq are dropped (stale/reordered).
+ *  - If cmd[] has no entry for THIS car's index -> neutral and failsafe, exactly
+ *    as if no packet had arrived. A car with no command must look identical to
+ *    a car with no link; it must never coast on a stale value or read a
+ *    neighbour's.
  *
  * Libraries (Arduino IDE -> Library Manager):
  *  - ArduinoJson (Benoit Blanchon)
@@ -83,6 +105,7 @@
 #include <WiFi.h>
 #include <WiFiUdp.h>
 #include <ArduinoJson.h>
+#include <Preferences.h>
 
 // ---- EDIT THESE ------------------------------------------------------------
 // WiFi credentials live in wifi_credentials.h (gitignored, stays local).
@@ -90,6 +113,14 @@
 // wifi_credentials.h and fill in the real network.
 #include "wifi_credentials.h"
 const uint16_t UDP_PORT = 8888;
+
+// Fallback index used only until one is stored in NVS (see CAR INDEX above).
+// Deliberately 0 so a single-car setup works with no extra step; the moment a
+// second car exists, set both explicitly over serial rather than relying on it.
+#ifndef DEFAULT_CAR_INDEX
+#define DEFAULT_CAR_INDEX 0
+#endif
+const int MAX_CARS = 8;   // sanity bound on an index typed over serial
 
 // Pin assignments (ESP32-S3 DevKitC-1: GPIO 25/26 do NOT exist on the S3,
 // avoid that reserved range -- these three are free, safe pins; 5 is the same
@@ -140,10 +171,68 @@ const int SERVO_LEDC_BITS    = 16;
 const uint32_t SERVO_FRAME_US = 1000000UL / SERVO_LEDC_FREQ_HZ;
 
 WiFiUDP udp;
+Preferences prefs;
 long lastSeq = -1;
 unsigned long lastPacketMs = 0;
 bool failsafeActive = true;
 char packetBuf[512];
+int carIndex = DEFAULT_CAR_INDEX;
+bool carIndexWasStored = false;
+unsigned long lastSlotWarnMs = 0;
+
+// Persist the car index in NVS so one binary serves the whole fleet and the
+// setting survives a reflash. Returns false on an out-of-range request rather
+// than storing something that would silently drive the wrong slot.
+bool setCarIndex(int idx) {
+  if (idx < 0 || idx >= MAX_CARS) return false;
+  carIndex = idx;
+  prefs.putInt("car_index", idx);
+  carIndexWasStored = true;
+  return true;
+}
+
+void handleConsoleLine(char *line) {
+  while (*line == ' ') line++;
+  if (strncmp(line, "index", 5) != 0) {
+    if (*line) Serial.println("commands: index | index <n>");
+    return;
+  }
+  char *arg = line + 5;
+  while (*arg == ' ') arg++;
+  if (*arg == '\0') {
+    Serial.printf("car index = %d (drives cmd[%d])\n", carIndex, carIndex);
+    return;
+  }
+  if (setCarIndex(atoi(arg))) {
+    Serial.printf("car index set to %d (saved) -- now drives cmd[%d]\n",
+                  carIndex, carIndex);
+  } else {
+    Serial.printf("REJECTED: index must be 0..%d, got '%s'\n", MAX_CARS - 1, arg);
+  }
+}
+
+// Serial console: "index" reports, "index <n>" sets.
+//
+// Character-at-a-time on purpose. Serial.readStringUntil() BLOCKS for the full
+// serial timeout (1 s by default) whenever a partial line is buffered with no
+// newline yet -- which would stall the UDP poll below and trip the car's own
+// failsafe. The control loop has absolute priority; nothing here may ever wait.
+void pollSerialConsole() {
+  static char buf[32];
+  static uint8_t len = 0;
+  while (Serial.available()) {
+    char c = (char)Serial.read();
+    if (c == '\n' || c == '\r') {
+      if (len > 0) {
+        buf[len] = '\0';
+        handleConsoleLine(buf);
+        len = 0;
+      }
+    } else if (len < sizeof(buf) - 1) {
+      buf[len++] = c;
+    }  // else: over-long line, drop the excess rather than overflow
+  }
+}
 
 // Drive the L298N throttle channel from a normalized [-1, 1] command: PWMs
 // whichever IN pin corresponds to the commanded direction, holds the other
@@ -194,6 +283,13 @@ void goNeutral() {
 
 void setup() {
   Serial.begin(115200);
+  prefs.begin("hive", false);
+  // Sentinel rather than Preferences::isKey(): isKey() is not present in every
+  // arduino-esp32 core this might be built against, and a stored index is never
+  // negative, so -1 unambiguously means "never set".
+  int stored = prefs.getInt("car_index", -1);
+  carIndexWasStored = (stored >= 0 && stored < MAX_CARS);
+  carIndex = carIndexWasStored ? stored : DEFAULT_CAR_INDEX;
   pinMode(THROTTLE_IN3_PIN, OUTPUT);
   pinMode(THROTTLE_IN4_PIN, OUTPUT);
   // ledcSetup returns 0 if the requested freq/resolution pair is unreachable.
@@ -215,11 +311,23 @@ void setup() {
   Serial.print("connecting to WiFi");
   while (WiFi.status() != WL_CONNECTED) { delay(250); Serial.print("."); }
   Serial.printf("\nIP: %s  listening on UDP %u\n", WiFi.localIP().toString().c_str(), UDP_PORT);
-  Serial.println("point run_controller.py at:  --esp <IP above>:8888");
+  // Loud, unmissable: an index mix-up between two cars is otherwise only
+  // visible as "the wrong car moved", which is slow to diagnose on the floor.
+  Serial.printf("=== CAR INDEX %d -- this car obeys cmd[%d] ===\n", carIndex, carIndex);
+  if (carIndexWasStored) {
+    Serial.println("    (loaded from NVS; change with:  index <n>)");
+  } else {
+    Serial.printf("    (NOT SET, using default %d. With more than one car, set every "
+                  "car explicitly:  index <n>)\n", DEFAULT_CAR_INDEX);
+  }
+  Serial.printf("point run_controller.py at:  --esp <IP above>:8888"
+                "   (fleet: --esp ip0:8888,ip1:8888,...  in car-index order)\n");
   udp.begin(UDP_PORT);
 }
 
 void loop() {
+  pollSerialConsole();
+
   int len = udp.parsePacket();
   if (len > 0) {
     int n = udp.read(packetBuf, sizeof(packetBuf) - 1);
@@ -238,29 +346,54 @@ void loop() {
       // a same-instant restart. Small backwards steps while live are still
       // dropped as genuinely stale/reordered packets.
       const long SEQ_RESYNC_GAP = 50;  // 5 s of packets -- beyond any real reordering
+      // Does this packet carry a command for THIS car? A shorter cmd[] than our
+      // index means the controller is driving a smaller fleet than we think we
+      // belong to -- a misconfiguration, not a driving decision.
+      JsonVariant mySlot = doc["cmd"][carIndex];
+      bool slotOk = !mySlot.isNull() && mySlot.size() >= 2;
+
       if (seq > lastSeq || failsafeActive || (lastSeq - seq) > SEQ_RESYNC_GAP) {
         lastSeq = seq;
-        lastPacketMs = millis();
         applied = true;
         if (estop) {
           goNeutral();
           failsafeActive = true;
+          lastPacketMs = millis();
           Serial.printf("#%ld E-STOP -> neutral\n", seq);
+        } else if (!slotOk) {
+          // Deliberately does NOT refresh lastPacketMs: a car with no command
+          // must behave exactly like a car with no link, so the normal failsafe
+          // path owns it rather than a second, subtly different code path.
+          goNeutral();
+          failsafeActive = true;
+          if (millis() - lastSlotWarnMs > 2000) {
+            lastSlotWarnMs = millis();
+            Serial.printf("#%ld NO COMMAND for car index %d (packet carries %d pair(s)) "
+                          "-> neutral. Check --esp order and this car's index.\n",
+                          seq, carIndex, (int)doc["cmd"].size());
+          }
         } else {
-          double thr = doc["cmd"][0][0] | 0.0;
-          double str = doc["cmd"][0][1] | 0.0;
+          double thr = mySlot[0] | 0.0;
+          double str = mySlot[1] | 0.0;
           driveMotor(THROTTLE_IN3_PIN, THROTTLE_IN4_PIN, thr, THROTTLE_MAX_DUTY);
           driveSteer(str);
           failsafeActive = false;
+          lastPacketMs = millis();
         }
       }  // else: stale/duplicate packet, not applied (still ACKed below)
 
       // Delivery confirmation: ACK every parseable packet back to its sender.
+      // "car" is this board's index -- with several cars on one socket it is the
+      // only way the PC can tell whose ACK it just read, and it makes a
+      // duplicate-index mix-up visible from the controller side.
       // "applied" tells the PC whether it drove the outputs or was dropped as
-      // stale; "rssi" (dBm) maps WiFi quality around the arena for free.
-      char ackBuf[96];
-      snprintf(ackBuf, sizeof(ackBuf), "{\"ack\":%ld,\"applied\":%s,\"rssi\":%d}",
-               seq, applied ? "true" : "false", WiFi.RSSI());
+      // stale; "slot" reports whether the packet actually addressed this car;
+      // "rssi" (dBm) maps WiFi quality around the arena for free.
+      char ackBuf[128];
+      snprintf(ackBuf, sizeof(ackBuf),
+               "{\"ack\":%ld,\"car\":%d,\"applied\":%s,\"slot\":%s,\"rssi\":%d}",
+               seq, carIndex, applied ? "true" : "false",
+               slotOk ? "true" : "false", WiFi.RSSI());
       udp.beginPacket(udp.remoteIP(), udp.remotePort());
       udp.write((const uint8_t*)ackBuf, strlen(ackBuf));
       udp.endPacket();

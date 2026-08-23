@@ -21,6 +21,9 @@ Examples (any Python 3.10+ with `pip install -r requirements.txt`):
   python run_controller.py --model models/n1_catch                      # sim, print only
   python run_controller.py --model models/n1_catch --esp 127.0.0.1:8888 # sim -> mock_esp
   python run_controller.py --model models/n1_catch --esp 192.168.4.10:8888 --realtime
+  # fleet: addresses in CAR_INDEX order -- the first address drives cmd[0]
+  python run_controller.py --model models/n3_catch --source udp \
+      --esp 192.168.4.10:8888,192.168.4.11:8888,192.168.4.12:8888
   python run_controller.py --model models/n1_pin --source udp --pose-port 9870 \
       --esp 192.168.4.10:8888 --rate-limit-speed
 """
@@ -33,7 +36,7 @@ import time
 from single_pursuer.env import DT, SinglePursuerEnv
 from controller_runtime.pose_types import VehiclePose
 
-from pc_controller.esp_link import EspLink
+from pc_controller.esp_link import EspLink, parse_targets
 from pc_controller.portable_loop import PortableLoop
 from pc_controller.pose_stream import UdpPoseSource
 
@@ -122,7 +125,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--model", default="models/n1_catch", help="model dir (models/n1_catch or models/n1_pin)")
     parser.add_argument("--source", choices=["sim", "udp"], default="sim")
-    parser.add_argument("--esp", default=None, help="ESP32 address as ip:port; omit to print instead of send")
+    parser.add_argument("--esp", default=None,
+                        help="ESP32 address as ip:port, or a comma-separated list in "
+                             "CAR_INDEX order for a fleet "
+                             "(ip0:8888,ip1:8888,ip2:8888). Omit to print instead of send.")
     parser.add_argument("--pose-port", type=int, default=9870, help="UDP port for perception frames (--source udp)")
     parser.add_argument("--episodes", type=int, default=3, help="sim episodes to run (--source sim)")
     parser.add_argument("--seed", type=int, default=0)
@@ -138,9 +144,25 @@ def main() -> None:
 
     link = None
     if args.esp:
-        host, _, port = args.esp.partition(":")
-        link = EspLink(host, int(port or 8888))
-        print(f"sending commands to udp://{link.addr[0]}:{link.addr[1]}")
+        targets = parse_targets(args.esp)
+        n_pursuers = loop.policy.num_pursuers
+        # Address ORDER is the fleet order: targets[i] must be the car flashed
+        # with CAR_INDEX i, because that is the car that will act on cmd[i].
+        # A mismatch here means the wrong physical car obeys each command, which
+        # is not something you want to discover with the wheels down.
+        if len(targets) > n_pursuers:
+            raise SystemExit(
+                f"--esp lists {len(targets)} cars but the model drives {n_pursuers} "
+                f"pursuer(s); car(s) {list(range(n_pursuers, len(targets)))} would "
+                "receive no command and sit in failsafe. Use a matching model or "
+                "fewer addresses.")
+        if len(targets) < n_pursuers:
+            print(f"WARNING: model drives {n_pursuers} pursuers but only {len(targets)} "
+                  f"car(s) given; slots {list(range(len(targets), n_pursuers))} are "
+                  "commanded but unaddressed (nothing listening).")
+        link = EspLink(targets)
+        for i, (host, port) in enumerate(targets):
+            print(f"  car index {i} (cmd[{i}]) -> udp://{host}:{port}")
     else:
         print("no --esp given: dry run, commands printed only")
 

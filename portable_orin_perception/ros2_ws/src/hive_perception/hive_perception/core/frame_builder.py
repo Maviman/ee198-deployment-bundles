@@ -41,21 +41,76 @@ class TimedPose:
 
 @dataclass(frozen=True)
 class MarkerMap:
-    """Contents of config/marker_map.yaml: which ArUco id is which vehicle."""
+    """Contents of config/marker_map.yaml: which fiducial id is which vehicle.
+
+    ``dictionary`` names the family (ArUco DICT_4X4_50, AprilTag
+    DICT_APRILTAG_36h11, ...). Everything downstream is family-agnostic — the
+    detector, the calibrator and the printable-sheet generator all take the
+    family from here, so switching families is a config edit plus a reprint,
+    never a code change.
+    """
 
     dictionary: str
     evader_id: int
     pursuer_ids: list[int]
     calibration_corner_ids: list[int]
+    max_correction_bits: int | None = None
+    extra_print_ids: list[int] | None = None
+
+    @property
+    def print_ids(self) -> list[int]:
+        """Every id the sheet generator should produce, including ids reserved
+        for vehicles not yet in the arena.
+
+        Deliberately wider than ``all_ids``: printing is slow and physical, and
+        a half-printed set from a previous family is a real hazard. Reserving
+        the future cars' sheets now means enabling them later is a one-line
+        config change, not another print run.
+        """
+        extra = sorted(set(self.extra_print_ids or []) - set(self.all_ids))
+        return self.all_ids + extra
+
+    @property
+    def all_ids(self) -> list[int]:
+        """Every id this arena prints, in the canonical order that defines the
+        subset dictionary's row indices. Vehicles first, then calibration
+        corners; sorted within each group so the order is reproducible from the
+        YAML alone. The detector and the calibrator MUST derive their tag set
+        from this same list or their row indices will disagree."""
+        vehicles = sorted(set(self.pursuer_ids + [self.evader_id]))
+        corners = sorted(set(self.calibration_corner_ids) - set(vehicles))
+        return vehicles + corners
+
+    def tag_set(self):
+        """The subset ``TagSet`` for this arena — see core.tag_family for why a
+        subset (8 codewords instead of 587) is what makes AprilTag affordable
+        on the CPU, and for the row-index/real-id trap it contains."""
+        from .tag_family import TagSet, family_spec
+
+        spec = family_spec(self.dictionary)
+        ids = tuple(self.all_ids)
+        if self.max_correction_bits is not None:
+            correction = int(self.max_correction_bits)
+        else:
+            # Default to the largest correction that cannot alias one printed
+            # tag onto another. Mis-identifying a vehicle is a safety failure,
+            # not a detection-rate inconvenience.
+            correction = TagSet(self.dictionary, ids, 0).safe_correction_bits()
+        _ = spec  # validates the family name early, with a clear error
+        return TagSet(dictionary=self.dictionary, real_ids=ids,
+                      max_correction_bits=correction)
 
 
 def load_marker_map(path) -> MarkerMap:
     data = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    raw_correction = data.get("max_correction_bits")
     return MarkerMap(
         dictionary=str(data["dictionary"]),
         evader_id=int(data["evader_id"]),
         pursuer_ids=[int(i) for i in data["pursuer_ids"]],
         calibration_corner_ids=[int(i) for i in data.get("calibration_corner_ids", [])],
+        max_correction_bits=None if raw_correction is None else int(raw_correction),
+        extra_print_ids=[int(i) for i in data.get("extra_print_ids", [])] or None,
     )
 
 

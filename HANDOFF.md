@@ -88,8 +88,10 @@ This matters more than it looks:
 ## Item 2 — Overhead camera FOV + resolution tooling
 
 > **STATUS 2026-08-22 — partly executed; read this before the section below.**
-> The tag family has been migrated to AprilTag tag36h11 and the CUDA groundwork
-> is in. What changed, and what it invalidates here:
+> The AprilTag tag36h11 path and the CUDA groundwork are in, with the family
+> switch itself left opt-in in `config/marker_map.yaml` (flipping it invalidates
+> every printed sheet, so it is not something a pull should do). What changed,
+> and what it invalidates here:
 >
 > - **`detectMarkers` is no longer the ceiling this section assumes.** Detection
 >   now runs against a *subset* dictionary of only the printed ids

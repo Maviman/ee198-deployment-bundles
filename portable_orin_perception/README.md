@@ -24,7 +24,7 @@ uses is mapped to the exact file where it appears.
 | `ros2_ws/src/hive_perception/hive_perception/*_node.py` | The ROS 2 nodes: `aruco_detector` (images → `/hive/vehicle_poses`), `pose_bridge` (poses → UDP JSON at 10 Hz), and `gst_camera` (optional hardware-JPEG camera, see below). Thin wrappers over `core/`. |
 | `ros2_ws/src/hive_perception/launch/perception.launch.py` | Brings up camera (`usb_cam`) + detector + bridge together. |
 | `config/` | `marker_map.yaml` (which id is which car), `arena_test_6ft.yaml` (calibration marker positions), `camera_info.yaml` (intrinsics — placeholder until calibrated), `arena_homography.yaml` (written by calibration, gitignored). |
-| `markers/` | Printable tag sheets (PDF at exact physical size + PNG). **AprilTag tag36h11.** Vehicles = 7 cm ids 0–3, calibration corners = 10 cm ids 10–13. |
+| `markers/` | Printable tag sheets (PDF at exact physical size + PNG), regenerated from `marker_map.yaml` — currently ArUco `DICT_4X4_50`. Vehicles = 7 cm ids 0–3, calibration corners = 10 cm ids 10–13. |
 | `vendored/` | Byte-identical copies of the controller's pose parser (`pc_controller/pose_stream.py` + its pose type) — the schema OWNER is `portable_n1_controller`; never edit these here. |
 | `tools/` | `generate_tags.py` (regenerate sheets + print the pixel budget), `probe_orin_gpu.py` (measure what GPU paths this Jetson actually offers), `pose_frame_monitor.py` (watch the live pose stream from the PC without the controller). |
 | `selftest.py` | Zero-hardware health check: the configured tag family detects through the subset dictionary, conventions hold, and our frames parse with the controller's own vendored parser. |
@@ -166,11 +166,18 @@ loaded, which is what produced the ~150% CPU and the ever-growing staleness. At
 controller only consumes 10 Hz. Re-measure before treating 720p as unreachable
 — `tools/probe_orin_gpu.py` does exactly this.
 
-## Tag family: AprilTag tag36h11 (migrated from ArUco DICT_4X4_50)
+## Tag family: ArUco today, AprilTag tag36h11 ready to switch on
 
-The project prints **AprilTag tag36h11**. The reason is CUDA: cuAprilTags is
-the only real GPU fiducial detector, and no ArUco equivalent exists in any
-OpenCV build.
+`config/marker_map.yaml` currently says **`DICT_4X4_50`** — the tags physically
+taped to the cars. The AprilTag tag36h11 migration is **complete in code and one
+line away**, left opt-in because flipping it invalidates every printed sheet:
+the detector stops seeing the old tags entirely, every pose frame is suppressed,
+and the cars sit in dead-man neutral until new sheets are printed and the arena
+is re-calibrated. Safe, but total — not something a `git pull` should do to a
+working arena. The switch procedure is in `marker_map.yaml` itself.
+
+The destination is tag36h11 because of CUDA: cuAprilTags is the only real GPU
+fiducial detector, and no ArUco equivalent exists in any OpenCV build.
 
 Three facts make the migration cheap, all verified in `test_core.py`:
 
@@ -192,7 +199,9 @@ Three facts make the migration cheap, all verified in `test_core.py`:
 
 3. **Switching family is a config edit**, not a code change: set `dictionary:`
    in `config/marker_map.yaml`, re-run `tools/generate_tags.py`, reprint,
-   re-run arena calibration. Reverting to `DICT_4X4_50` works the same way.
+   re-run arena calibration. Reverting works the same way. The subset trick
+   helps the current ArUco config too — 50 codes down to 6, measured
+   5.38 → 4.79 ms at 720p — so it is a small speedup even before the switch.
 
 ### The trap the subset creates
 

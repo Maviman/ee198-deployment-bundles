@@ -285,8 +285,10 @@ ros2 run camera_calibration cameracalibrator --size 8x6 --square 0.025 \
 
 ## Step 4 — tag family (optional, requires printing)
 
-**Staying on ArUco is fine.** The code is family-agnostic and verified both
-ways; the subset-dictionary change even makes ArUco slightly faster.
+**Staying on ArUco is fine, and is the shipped default.** The code is
+family-agnostic and verified both ways; the subset-dictionary change even makes
+ArUco slightly faster (5.38 → 4.79 ms at 720p). Nothing below is required for a
+normal driving session.
 
 Check which family is configured:
 

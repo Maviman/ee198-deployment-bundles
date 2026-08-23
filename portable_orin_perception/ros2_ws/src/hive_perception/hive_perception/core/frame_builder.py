@@ -92,10 +92,19 @@ class MarkerMap:
         if self.max_correction_bits is not None:
             correction = int(self.max_correction_bits)
         else:
-            # Default to the largest correction that cannot alias one printed
-            # tag onto another. Mis-identifying a vehicle is a safety failure,
-            # not a detection-rate inconvenience.
-            correction = TagSet(self.dictionary, ids, 0).safe_correction_bits()
+            # Conservative on purpose, and capped WELL below what the codeword
+            # distance would allow. Two different risks pull opposite ways:
+            #   - too little correction -> a blurred tag goes undetected (a
+            #     dropped frame; the dead-man already handles that safely)
+            #   - too much correction   -> random image noise gets "corrected"
+            #     into a valid id, i.e. a PHANTOM vehicle at a wrong pose, which
+            #     the pipeline has no way to distinguish from a real detection
+            #     and will happily drive a car from.
+            # A missed detection is recoverable; a confident wrong pose is not.
+            # 2 bits is also the value the detection-rate sweep in
+            # tag_family.min_detect_px was measured at, so the numbers quoted
+            # there describe this configuration rather than a different one.
+            correction = min(2, TagSet(self.dictionary, ids, 0).safe_correction_bits())
         _ = spec  # validates the family name early, with a clear error
         return TagSet(dictionary=self.dictionary, real_ids=ids,
                       max_correction_bits=correction)

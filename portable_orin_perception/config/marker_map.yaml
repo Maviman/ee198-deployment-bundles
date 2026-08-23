@@ -5,39 +5,59 @@
 # the tag's canonical TOP edge toward the car's NOSE. The detector derives
 # heading from that edge; mounted sideways = heading off by 90 degrees.
 #
-# FAMILY: AprilTag tag36h11, replacing ArUco DICT_4X4_50.
-#   Why: it is the only family with a real CUDA detector (NVIDIA cuAprilTags /
-#   isaac_ros_apriltag), and it carries per-tag 6-DOF pose for later 3D work.
-#   OpenCV ships the genuine 36h11 codebook, so the CPU detector reads exactly
-#   the same printed sheets — the GPU move is then a detector swap, not a
-#   reprint.
+# ---------------------------------------------------------------------------
+# FAMILY. Currently ArUco DICT_4X4_50 -- the tags physically taped to the cars.
 #
-#   Cost: 36h11 is 8 modules across vs ArUco 4x4's 6, so at equal tag size and
-#   resolution it needs ~1.33x more pixels. tools/generate_tags.py prints the
-#   pixel budget for your arena; check it before a print run.
+# The AprilTag tag36h11 migration is COMPLETE IN CODE and one line away. It is
+# not switched on by default only because flipping it invalidates every printed
+# sheet: the detector stops seeing the old tags entirely, every pose frame is
+# suppressed, and the cars sit in dead-man neutral until new sheets are printed
+# and the arena is re-calibrated. That is a safe failure but a total one, so it
+# is opt-in rather than something a `git pull` does to a working arena.
 #
-#   REPRINT REQUIRED when changing this line. The old ArUco sheets will not be
-#   detected, and calibration must be re-run with the new corner tags.
-#   To revert: set DICT_4X4_50 and reprint — nothing in the code is
-#   family-specific.
-dictionary: DICT_APRILTAG_36h11
+# TO SWITCH (do this when you can print and re-calibrate in the same session):
+#   1. dictionary: DICT_APRILTAG_36h11        (edit the line below)
+#   2. python3 tools/generate_tags.py         (prints the pixel budget -- HEED IT)
+#   3. print markers/*.pdf at 100% scale, ruler-check one black square
+#   4. re-tape vehicle tags, top edge toward each car's nose
+#   5. ./calibrate_arena.sh --device /dev/video0
+#   6. python3 selftest.py                    (must print SELFTEST PASSED)
+# Reverting is the same six steps with DICT_4X4_50. No code is family-specific.
+#
+# WHY tag36h11 is the destination: cuAprilTags (isaac_ros_apriltag) is the only
+# genuine CUDA fiducial detector -- OpenCV's ArUco has no CUDA implementation in
+# any build. OpenCV ships the real 36h11 codebook, so the CPU detector reads
+# exactly the same printed sheets the GPU detector will, making the eventual GPU
+# move a detector swap rather than a second reprint.
+#
+# WHAT IT COSTS: 36h11 is 8 modules across vs ArUco 4x4's 6, so at equal tag
+# size and resolution it needs ~1.33x more pixels. At 640x480 a 7 cm tag lands
+# at 24 px against a ~28 px blurred-detection floor -- generate_tags.py reports
+# TOO SMALL. Practically this means the family switch and the move to 1280x720
+# are one decision, not two. See JETSON_TUNING.md steps 3 and 4.
+# ---------------------------------------------------------------------------
+dictionary: DICT_4X4_50
 evader_id: 0
 pursuer_ids: [1]            # N=1 test: only car 1 physically in the arena.
                             # slot order: pursuers[0] is P1, etc. Restore
                             # [1, 2, 3] when the other two cars are added.
+                            # This order also defines CAR_INDEX on the ESP32s
+                            # and the --esp address order (see
+                            # portable_n1_controller/README.md).
 calibration_corner_ids: [10, 11, 12, 13]
 
 # Sheets to PRINT but not yet track. Cars 2 and 3 are coming; printing their
-# tags in this run means enabling them later is a one-line edit to pursuer_ids
-# above, with no second print run and no risk of a leftover ArUco sheet being
-# printed by mistake. These ids stay out of the detector's subset dictionary
-# until they are moved into pursuer_ids.
+# tags in the same run means enabling them later is a one-line edit to
+# pursuer_ids above, with no second print run and no risk of a leftover sheet
+# from a different family being printed by mistake. These ids stay out of the
+# detector's subset dictionary until they are moved into pursuer_ids.
 extra_print_ids: [2, 3]
 
-# Bit errors the detector may correct per tag. Left unset, the code picks the
-# largest value that cannot alias one printed tag onto another, derived from
-# the Hamming distance between just these ids (see core/tag_family.py).
-# Detection cost is flat in this parameter once the subset dictionary is small,
-# so there is no speed reason to raise it — and mis-identifying a vehicle is a
-# safety failure, not a dropped-frame inconvenience.
+# Bit errors the detector may correct per tag. Left unset, the code picks a
+# conservative value (2), capped well below what the codeword distance would
+# allow. Too little correction loses a blurred tag for one frame, which the
+# dead-man handles; too much lets image noise be "corrected" into a valid id --
+# a phantom vehicle at a wrong pose, which nothing downstream can distinguish
+# from a real detection. A missed frame is recoverable; a confident wrong pose
+# is not.
 # max_correction_bits: 2

@@ -47,7 +47,7 @@ sudo apt-get install -y \
     python3-opencv python3-numpy python3-yaml \
     chrony v4l-utils
 
-echo "== [4/6] Checking OpenCV ArUco =="
+echo "== [4/6] Checking OpenCV fiducial support =="
 python3 - <<'PY'
 import cv2
 ok = hasattr(cv2, "aruco") and hasattr(cv2.aruco, "ArucoDetector")
@@ -57,6 +57,19 @@ if not ok:
         "cv2.aruco.ArucoDetector missing (OpenCV < 4.7?). Fix with:\n"
         "  pip3 install --user opencv-contrib-python\n"
         "then re-run this script.")
+
+# The project prints AprilTag tag36h11 (config/marker_map.yaml). OpenCV carries
+# the genuine 36h11 codebook, which is what lets the CPU detector and NVIDIA
+# cuAprilTags read the same printed sheets — so its absence is fatal, not cosmetic.
+if not hasattr(cv2.aruco, "DICT_APRILTAG_36h11"):
+    raise SystemExit(
+        "cv2.aruco.DICT_APRILTAG_36h11 missing — this OpenCV build has no AprilTag\n"
+        "codebook, so it cannot detect or generate the configured tags. Fix with:\n"
+        "  pip3 install --user opencv-contrib-python\n"
+        "then re-run this script.")
+d = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_APRILTAG_36h11)
+print(f"AprilTag tag36h11 codebook: {d.bytesList.shape[0]} tags, "
+      f"{d.markerSize}x{d.markerSize} data bits")
 PY
 
 echo "== [5/6] rosdep =="

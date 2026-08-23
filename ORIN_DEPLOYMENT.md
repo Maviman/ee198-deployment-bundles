@@ -104,10 +104,28 @@ Remember: any camera move invalidates the homography — recalibrate.
 
 ## Phase 4 — live all-on-Orin session (the demo runbook)
 
+One command, one terminal — brings up perception with the debug camera
+window (`rqt_image_view` on `/hive/debug_image`) and immediately starts the
+AI driving the pursuer over WiFi to the ESP32:
+
+```bash
+./start_demo.sh <esp-ip>                                # model defaults to n1_catch
+./start_demo.sh <esp-ip> portable_n1_controller/models/n1_pin
+```
+
+Ctrl-C stops both perception and the controller. Requires the one-time setup
+in Phases 0.5–3 (SSH key, `setup_orin.sh`, and arena calibration) to already
+be done — `start_demo.sh` checks for the calibration file and the controller
+venv and exits with a clear error if either is missing.
+
+Under the hood this is just two things running together, and you can still
+run them by hand in two terminals if you want separate output or to skip the
+debug window (e.g. to save CPU once everything's confirmed working):
+
 ```bash
 # Terminal A — perception, pointed at this same machine
 cd portable_orin_perception
-./run_perception.sh 127.0.0.1 expected_pursuers:=1
+./run_perception.sh 127.0.0.1 expected_pursuers:=1        # add debug:=true for the window
 
 # Terminal B — the AI
 cd ../portable_n1_controller

@@ -31,6 +31,11 @@ camera or refocus.
 
 ## 2. Arena homography — ~2 min, redo every time the camera moves
 
+> **Tags are AprilTag tag36h11 as of 2026-08-22** (was ArUco DICT_4X4_50).
+> If your printed sheets predate that, reprint: `python3 tools/generate_tags.py`
+> then print `markers/*.pdf` at 100% scale. Old ArUco sheets will not be
+> detected at all.
+
 1. Place markers `10,11,12,13` (the 10cm sheets in `markers/`) - id 10
    top-left, clockwise (11 top-right, 12 bottom-right, 13 bottom-left), per
    `config/arena_test_6ft.yaml`.

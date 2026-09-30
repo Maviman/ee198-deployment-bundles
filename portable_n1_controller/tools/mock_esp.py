@@ -71,6 +71,16 @@ def main() -> None:
                 # controller shutdown -- which matters more with a fleet, where
                 # you leave three of these running across many controller restarts.
                 continue
+            try:
+                probe = json.loads(raw.decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                continue
+            if "probe" in probe:
+                # Discovery (`--esp auto`, `arena cars`): answer like the firmware,
+                # with no effect on the (mock) outputs.
+                sock.sendto(json.dumps({"car": args.index, "fw": "mock", "mac": f"mock:{args.index}",
+                                        "failsafe": not armed, "rssi": -42}).encode("utf-8"), addr)
+                continue
             packet = parse_command_packet(raw)
             now = time.time()
             started = started or now

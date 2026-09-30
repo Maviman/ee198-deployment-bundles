@@ -46,6 +46,11 @@ import time
 import numpy as np
 
 DEFAULT_PORT = 8888
+# DSCP "expedited forwarding". WiFi WMM maps it to the voice access category,
+# which waits less for airtime and retries sooner than best-effort traffic
+# when the channel is busy. Free to set, and it only helps these ~100-byte
+# packets.
+DSCP_EF = 0xB8
 
 
 def parse_targets(spec: str, default_port: int = DEFAULT_PORT) -> list[tuple[str, int]]:
@@ -90,8 +95,26 @@ class EspLink:
             self.targets = parse_targets(targets, port)
         else:
             self.targets = [(str(h), int(p)) for h, p in targets]
+        # Resolve names ONCE: sendto() with a hostname (e.g. hive-car0.local)
+        # would do an mDNS lookup on every 10 Hz packet.
+        resolved = []
+        for host, p in self.targets:
+            try:
+                resolved.append((socket.gethostbyname(host), p))
+            except OSError:
+                resolved.append((host, p))       # leave it; the send will fail loudly per packet
+        self.targets = resolved
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.setblocking(False)
+        try:
+            self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_TOS, DSCP_EF)
+        except (OSError, AttributeError):
+            pass
+        # seq -> perf_counter() at send, for ACK round-trip times (poll_acks).
+        self._sent_at: dict[int, float] = {}
+        self.car_stats = {i: {"acks": 0, "rtt_ms": None, "rssi": None, "applied": None,
+                              "slot": None, "last_ack": None}
+                          for i in range(len(self.targets))}
         # Windows quirk: an ICMP port-unreachable from any send makes the NEXT
         # recvfrom on this socket raise ConnectionResetError (once per bounced
         # datagram). The ack readers swallow those and keep listening, so a
@@ -180,12 +203,48 @@ class EspLink:
                 f"{pairs} command pair(s) for {len(self.targets)} car(s): car(s) "
                 f"{list(range(pairs, len(self.targets)))} would receive nothing. "
                 "Check --esp against the model's num_pursuers.")
+        self._sent_at[self.seq] = time.perf_counter()
+        if len(self._sent_at) > 64:
+            for old_seq in sorted(self._sent_at)[:-64]:
+                del self._sent_at[old_seq]
         for target in self.targets:
-            self.sock.sendto(payload, target)
+            try:
+                self.sock.sendto(payload, target)
+            except OSError:
+                # A car that is off / out of range must not stop the others
+                # from getting this tick. Its own failsafe covers it.
+                continue
             self.datagrams_sent += 1
         self.seq += 1
         self.packets_sent += 1
         return packet
+
+    def poll_acks(self) -> int:
+        """Drain every ACK waiting on the socket, without blocking, into
+        ``car_stats`` (round-trip ms, RSSI, applied). Call once per control
+        tick. Returns how many ACKs were read."""
+        now = time.perf_counter()
+        n = 0
+        while True:
+            try:
+                raw, _addr = self.sock.recvfrom(512)
+            except (BlockingIOError, ConnectionResetError, OSError):
+                return n
+            try:
+                ack = json.loads(raw.decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                continue
+            seq = ack.get("ack")
+            car = int(ack.get("car", 0))
+            st = self.car_stats.setdefault(car, {"acks": 0})
+            st["acks"] = st.get("acks", 0) + 1
+            if seq in self._sent_at:
+                st["rtt_ms"] = round((now - self._sent_at[seq]) * 1000.0, 2)
+            st["rssi"] = ack.get("rssi")
+            st["applied"] = ack.get("applied")
+            st["slot"] = ack.get("slot")
+            st["last_ack"] = now
+            n += 1
 
     def send_stop(self) -> dict:
         """Explicit neutral/E-stop packet to EVERY car (also the shutdown message).
@@ -202,6 +261,79 @@ class EspLink:
             self.send_stop()
         finally:
             self.sock.close()
+
+
+def _broadcast_addresses() -> list[str]:
+    """Directed broadcast address of every IPv4 interface (Linux: from `ip`),
+    plus 255.255.255.255. A limited broadcast alone leaves via the default
+    route only. On a control Orin with Ethernet to the vision Orin and WiFi to
+    the cars, that can be the wrong interface."""
+    import subprocess
+
+    out = {"255.255.255.255"}
+    try:
+        text = subprocess.run(["ip", "-o", "-4", "addr", "show"], capture_output=True,
+                              text=True, timeout=2).stdout
+        for line in text.splitlines():
+            parts = line.split()
+            if "brd" in parts:
+                out.add(parts[parts.index("brd") + 1])
+    except (OSError, subprocess.SubprocessError):
+        try:
+            host_ip = socket.gethostbyname(socket.gethostname())
+            if not host_ip.startswith("127."):
+                out.add(".".join(host_ip.split(".")[:3]) + ".255")
+        except OSError:
+            pass
+    return sorted(out)
+
+
+def discover_cars(port: int = DEFAULT_PORT, *, timeout_s: float = 1.0,
+                  extra_targets: list[str] | None = None) -> dict[int, dict]:
+    """Find the cars on the network: {car index: reply}. Every reply carries
+    "ip", "car" and, from current firmware, "fw"/"mac"/"failsafe"/"up_s".
+
+    Current firmware answers a ``{"probe": 1}`` datagram without touching the
+    motors. Firmware from before the probe existed treats it as an E-stop
+    packet and ACKs it with its car index, so discovery still finds those
+    cars. Harmless while the cars are idle, which is the only time discovery
+    runs (controller start-up, `arena cars`). Duplicate indices are returned
+    under the key -1 as a list, because they are a fleet misconfiguration."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    sock.settimeout(0.05)
+    probe = json.dumps({"probe": 1}).encode("utf-8")
+    for addr in _broadcast_addresses() + list(extra_targets or []):
+        try:
+            sock.sendto(probe, (addr, port))
+        except OSError:
+            continue
+    found: dict[int, dict] = {}
+    dupes: list[dict] = []
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        try:
+            raw, (ip, _p) = sock.recvfrom(1024)
+        except (socket.timeout, ConnectionResetError):
+            continue
+        except OSError:
+            break
+        try:
+            msg = json.loads(raw.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        if "car" not in msg:
+            continue
+        msg["ip"] = ip
+        msg.setdefault("fw", "pre-probe firmware")
+        idx = int(msg["car"])
+        if idx in found and found[idx]["ip"] != ip:
+            dupes.extend([found[idx], msg])
+        found.setdefault(idx, msg)
+    sock.close()
+    if dupes:
+        found[-1] = dupes    # type: ignore[assignment]
+    return found
 
 
 def parse_command_packet(raw: bytes | str) -> dict:

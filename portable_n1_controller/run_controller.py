@@ -26,19 +26,25 @@ Examples (any Python 3.10+ with `pip install -r requirements.txt`):
       --esp 192.168.4.10:8888,192.168.4.11:8888,192.168.4.12:8888
   python run_controller.py --model models/n1_pin --source udp --pose-port 9870 \
       --esp 192.168.4.10:8888 --rate-limit-speed
+  # what `arena up` runs on the control Orin: find the cars by broadcast, start
+  # disarmed, report to the hub, take arm/disarm on localhost:9872
+  python run_controller.py --model models/n1_catch --source udp --esp auto \
+      --telemetry 127.0.0.1:9871 --control-port 9872 --start-disarmed
 """
 
 from __future__ import annotations
 
 import argparse
+import signal
 import time
 
 from single_pursuer.env import DT, SinglePursuerEnv
 from controller_runtime.pose_types import VehiclePose
 
-from pc_controller.esp_link import EspLink, parse_targets
+from pc_controller.esp_link import EspLink, discover_cars, parse_targets
 from pc_controller.portable_loop import PortableLoop
 from pc_controller.pose_stream import UdpPoseSource
+from pc_controller.realtime import run_realtime
 
 
 def _world_env_from_metrics(loop: PortableLoop, seed: int) -> SinglePursuerEnv:
@@ -88,7 +94,9 @@ def run_sim(loop: PortableLoop, link: EspLink | None, *, episodes: int, seed: in
     print(f"latency: {loop.latency_budget.summary()}")
 
 
-def run_udp(loop: PortableLoop, link: EspLink | None, *, pose_port: int) -> None:
+def run_udp_legacy(loop: PortableLoop, link: EspLink | None, *, pose_port: int) -> None:
+    """The original loop: tick on every frame received, no telemetry. Kept for
+    A/B comparison (--legacy-loop). The default is pc_controller.realtime."""
     source = UdpPoseSource(pose_port, expected_pursuers=loop.policy.num_pursuers)
     print(f"listening for pose frames on UDP :{pose_port} (ctrl-C to stop) ...")
     stalled = False
@@ -128,14 +136,49 @@ def main() -> None:
     parser.add_argument("--esp", default=None,
                         help="ESP32 address as ip:port, or a comma-separated list in "
                              "CAR_INDEX order for a fleet "
-                             "(ip0:8888,ip1:8888,ip2:8888). Omit to print instead of send.")
+                             "(ip0:8888,ip1:8888,ip2:8888), or 'auto' to find the cars by "
+                             "broadcast (needs exactly car indices 0..N-1 to answer). "
+                             "Omit to print instead of send.")
     parser.add_argument("--pose-port", type=int, default=9870, help="UDP port for perception frames (--source udp)")
     parser.add_argument("--episodes", type=int, default=3, help="sim episodes to run (--source sim)")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--realtime", action="store_true", help="pace sim at real 10 Hz (use when an ESP is attached)")
     parser.add_argument("--rate-limit-speed", action="store_true",
                         help="clamp velocity estimates to vehicle accel limits (contact-noise mitigation)")
+    rt = parser.add_argument_group("real-time loop (--source udp)")
+    rt.add_argument("--tick-hz", type=float, default=10.0,
+                    help="control rate; the policy was trained at 10 Hz")
+    rt.add_argument("--max-pose-age", type=float, default=0.15,
+                    help="never act on a pose whose perception latency exceeds this (s)")
+    rt.add_argument("--telemetry", default=None, help="arena hub host:port, e.g. 127.0.0.1:9871")
+    rt.add_argument("--control-port", type=int, default=None,
+                    help="localhost UDP port for arm/disarm (the `arena go`/`halt` commands)")
+    rt.add_argument("--start-disarmed", action="store_true",
+                    help="send E-stop to every car until an operator arms")
+    rt.add_argument("--legacy-loop", action="store_true",
+                    help="the original tick-per-frame loop, for A/B comparison")
     args = parser.parse_args()
+    # The arm switch, the pose-age gate and telemetry exist only in the real-time
+    # loop. Accepting them anywhere else would mean a "disarmed" start that drives
+    # the cars on the first frame, and a STOP that nothing is listening for.
+    if args.legacy_loop and (args.start_disarmed or args.control_port or args.telemetry):
+        parser.error("--legacy-loop has no arm switch, STOP port or telemetry: drop "
+                     "--start-disarmed/--control-port/--telemetry, or drop --legacy-loop")
+    if args.source == "sim" and (args.start_disarmed or args.control_port):
+        parser.error("--start-disarmed/--control-port apply only to --source udp "
+                     "(a sim run with --esp drives the cars immediately)")
+
+    # `arena stop` sends SIGTERM. Turn it into the same clean shutdown as
+    # Ctrl-C, so the E-stop in link.close() goes out before the process exits.
+    # Later TERMs (the supervisor forwards one) are ignored, so nothing can
+    # interrupt that final E-stop halfway through.
+    def _term(*_a):
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        raise KeyboardInterrupt
+    try:
+        signal.signal(signal.SIGTERM, _term)
+    except (ValueError, AttributeError):
+        pass
 
     loop = PortableLoop(args.model, rate_limit_speed=args.rate_limit_speed)
     m = loop.policy.metrics
@@ -143,6 +186,21 @@ def main() -> None:
           f"capture_mode={m.get('capture_mode')}, evader_speed={m.get('evader_speed_frac')})")
 
     link = None
+    if args.esp == "auto":
+        n_pursuers = loop.policy.num_pursuers
+        found = discover_cars()
+        if -1 in found:
+            clash = ", ".join(f"{d['ip']} (index {d['car']})" for d in found.pop(-1))
+            raise SystemExit(f"two cars share a CAR_INDEX: {clash}. Give each car its own "
+                             "index (`arena cars index <ip> <n>`) before driving.")
+        missing = [i for i in range(n_pursuers) if i not in found]
+        if missing:
+            seen = ", ".join(f"index {i} @ {d['ip']}" for i, d in sorted(found.items())) or "none"
+            raise SystemExit(f"--esp auto: no car answered for index {missing} (found: {seen}). "
+                             "Is it powered and on this WiFi? `arena cars` lists what answers.")
+        args.esp = ",".join(f"{found[i]['ip']}:8888" for i in range(n_pursuers))
+        print("discovered: " + ", ".join(
+            f"car {i} @ {found[i]['ip']} ({found[i].get('fw')})" for i in range(n_pursuers)))
     if args.esp:
         targets = parse_targets(args.esp)
         n_pursuers = loop.policy.num_pursuers
@@ -169,8 +227,14 @@ def main() -> None:
     try:
         if args.source == "sim":
             run_sim(loop, link, episodes=args.episodes, seed=args.seed, realtime=args.realtime or bool(args.esp))
+        elif args.legacy_loop:
+            run_udp_legacy(loop, link, pose_port=args.pose_port)
         else:
-            run_udp(loop, link, pose_port=args.pose_port)
+            run_realtime(loop, link, pose_port=args.pose_port, tick_hz=args.tick_hz,
+                         max_pose_age_s=args.max_pose_age, telemetry=args.telemetry,
+                         control_port=args.control_port, start_disarmed=args.start_disarmed,
+                         model_name=args.model,
+                         log=lambda m: print(f"[control {time.strftime('%H:%M:%S')}] {m}", flush=True))
     finally:
         if link is not None:
             link.close()

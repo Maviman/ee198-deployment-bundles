@@ -33,6 +33,17 @@
  *    a car with no link; it must never coast on a stale value or read a
  *    neighbour's.
  *
+ * ARENA TOOLING (the `arena` CLI at the repo root):
+ *  - Discovery: a {"probe":1} datagram gets an info reply (index, IP, MAC,
+ *    firmware, failsafe state) and has NO effect on the outputs. This is how
+ *    `run_controller.py --esp auto` and `arena cars` find the fleet without
+ *    anyone reading IPs off a serial monitor.
+ *  - Remote index: {"cfg":{"index":n}} sets CAR_INDEX like the serial command,
+ *    but ONLY while this car is in failsafe (not being driven).
+ *  - OTA firmware updates (`arena flash --ota`): enabled only when
+ *    wifi_credentials.h defines OTA_PASSWORD, and serviced ONLY while the car
+ *    is in failsafe. An update can never start on a car that is driving.
+ *
  * Libraries (Arduino IDE -> Library Manager):
  *  - ArduinoJson (Benoit Blanchon)
  *  (No servo library: the steering servo is driven from the ESP32's own LEDC
@@ -110,8 +121,15 @@
 // ---- EDIT THESE ------------------------------------------------------------
 // WiFi credentials live in wifi_credentials.h (gitignored, stays local).
 // First build on a new machine: copy wifi_credentials.h.example to
-// wifi_credentials.h and fill in the real network.
+// wifi_credentials.h and fill in the real network. It may also define
+// OTA_PASSWORD, so it MUST be included before the OTA check just below.
 #include "wifi_credentials.h"
+#ifdef OTA_PASSWORD
+#include <ArduinoOTA.h>
+#endif
+
+#define FW_VERSION "2026.09-arena"
+
 const uint16_t UDP_PORT = 8888;
 
 // Fallback index used only until one is stored in NVS (see CAR INDEX above).
@@ -179,6 +197,7 @@ char packetBuf[512];
 int carIndex = DEFAULT_CAR_INDEX;
 bool carIndexWasStored = false;
 unsigned long lastSlotWarnMs = 0;
+bool otaEnabled = false;
 
 // Persist the car index in NVS so one binary serves the whole fleet and the
 // setting survives a reflash. Returns false on an out-of-range request rather
@@ -281,6 +300,60 @@ void goNeutral() {
   driveSteer(0.0);  // wheels straight
 }
 
+// Discovery / status reply. Pure information: reading it changes nothing.
+void sendInfo(IPAddress ip, uint16_t port) {
+  char buf[256];
+  snprintf(buf, sizeof(buf),
+           "{\"car\":%d,\"fw\":\"%s\",\"mac\":\"%s\",\"failsafe\":%s,"
+           "\"up_s\":%lu,\"last_seq\":%ld,\"rssi\":%d,\"ota\":%s,\"duty_max\":%d}",
+           carIndex, FW_VERSION, WiFi.macAddress().c_str(),
+           failsafeActive ? "true" : "false", millis() / 1000UL, lastSeq,
+           WiFi.RSSI(), otaEnabled ? "true" : "false", THROTTLE_MAX_DUTY);
+  udp.beginPacket(ip, port);
+  udp.write((const uint8_t*)buf, strlen(buf));
+  udp.endPacket();
+}
+
+// {"cfg":{"index":n}}: the serial "index n" command over the network, for
+// fleets where the cars are already sealed up. Refused while driving.
+void handleCfg(JsonVariant cfg, IPAddress ip, uint16_t port) {
+  if (!failsafeActive) {
+    const char *msg = "{\"cfg_ok\":false,\"reason\":\"car is being driven; stop it first\"}";
+    udp.beginPacket(ip, port);
+    udp.write((const uint8_t*)msg, strlen(msg));
+    udp.endPacket();
+    return;
+  }
+  if (!cfg["index"].isNull()) {
+    int idx = cfg["index"] | -1;
+    if (setCarIndex(idx)) {
+      Serial.printf("car index set to %d over the network (saved) -- now drives cmd[%d]\n",
+                    carIndex, carIndex);
+    }
+  }
+  sendInfo(ip, port);
+}
+
+void setupOta() {
+#ifdef OTA_PASSWORD
+  char host[24];
+  snprintf(host, sizeof(host), "hive-car%d", carIndex);
+  ArduinoOTA.setHostname(host);
+  ArduinoOTA.setPassword(OTA_PASSWORD);
+  ArduinoOTA.onStart([]() {
+    goNeutral();          // belt and braces: OTA is only serviced in failsafe anyway
+    Serial.println("OTA update starting -- outputs neutral");
+  });
+  ArduinoOTA.onEnd([]() { Serial.println("OTA update done, rebooting"); });
+  ArduinoOTA.onError([](ota_error_t e) { Serial.printf("OTA error %u\n", e); });
+  ArduinoOTA.begin();
+  otaEnabled = true;
+  Serial.printf("OTA ready as %s.local (serviced only while in failsafe)\n", host);
+#else
+  Serial.println("OTA off (define OTA_PASSWORD in wifi_credentials.h to enable `arena flash --ota`)");
+#endif
+}
+
 void setup() {
   Serial.begin(115200);
   prefs.begin("hive", false);
@@ -321,8 +394,11 @@ void setup() {
                   "car explicitly:  index <n>)\n", DEFAULT_CAR_INDEX);
   }
   Serial.printf("point run_controller.py at:  --esp <IP above>:8888"
-                "   (fleet: --esp ip0:8888,ip1:8888,...  in car-index order)\n");
+                "   (fleet: --esp ip0:8888,ip1:8888,...  in car-index order;"
+                " or --esp auto)\n");
+  Serial.printf("firmware %s\n", FW_VERSION);
   udp.begin(UDP_PORT);
+  setupOta();
 }
 
 void loop() {
@@ -334,7 +410,13 @@ void loop() {
     packetBuf[max(n, 0)] = '\0';
 
     StaticJsonDocument<512> doc;
-    if (deserializeJson(doc, packetBuf) == DeserializationError::Ok) {
+    // A malformed packet is ignored outright (no ACK, no effect), as before.
+    bool parsed = deserializeJson(doc, packetBuf) == DeserializationError::Ok;
+    if (parsed && !doc["probe"].isNull()) {
+      sendInfo(udp.remoteIP(), udp.remotePort());     // discovery: no effect on outputs
+    } else if (parsed && !doc["cfg"].isNull()) {
+      handleCfg(doc["cfg"], udp.remoteIP(), udp.remotePort());
+    } else if (parsed) {
       long seq = doc["seq"] | -1L;
       bool estop = doc["estop"] | true;  // missing field -> treat as e-stop
       bool applied = false;
@@ -357,9 +439,13 @@ void loop() {
         applied = true;
         if (estop) {
           goNeutral();
+          if (!failsafeActive) {
+            // Once per stop, not per packet: a disarmed controller sends
+            // E-stop at 10 Hz, and 10 lines/s would bury everything else.
+            Serial.printf("#%ld E-STOP -> neutral\n", seq);
+          }
           failsafeActive = true;
           lastPacketMs = millis();
-          Serial.printf("#%ld E-STOP -> neutral\n", seq);
         } else if (!slotOk) {
           // Deliberately does NOT refresh lastPacketMs: a car with no command
           // must behave exactly like a car with no link, so the normal failsafe
@@ -405,4 +491,10 @@ void loop() {
     failsafeActive = true;
     Serial.println("FAILSAFE: command stream stalled -> neutral");
   }
+
+#ifdef OTA_PASSWORD
+  // Only while stopped: an update blocks this loop for seconds, which is
+  // harmless for a car in neutral and unacceptable for one being driven.
+  if (failsafeActive) ArduinoOTA.handle();
+#endif
 }

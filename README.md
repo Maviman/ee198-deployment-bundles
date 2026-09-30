@@ -6,24 +6,25 @@ This repo is what actually runs on the hardware — no training repo, no PyTorch
 ## How it works
 
 ```
-  overhead camera
-        │
-        ▼
-  ArUco perception  ──── pose frames ────►  pursuit policy (ONNX)
-   (Jetson Orin)          UDP :9870              │
-                                                 │ throttle / steer
-                                                 ▼  UDP :8888
-                                          ESP32 on the car
-                                                 │
-                                    ┌────────────┴────────────┐
-                                    ▼                         ▼
-                            L298N H-bridge            steering servo
-                          7.4 V drive motor
+  overhead camera ── USB ──► VISION ORIN: run_vision.py
+                               newest frame -> tag detection -> pose frame (every frame)
+                                        │ UDP :9870  (Ethernet between the Orins)
+                                        ▼
+                             CONTROL ORIN: run_controller.py + dashboard
+                               pursuit policy (ONNX), one tick per 100 ms
+                                        │ throttle / steer, UDP :8888 (WiFi)
+                                        ▼
+                                 ESP32 on each car
+                                        │
+                           ┌────────────┴────────────┐
+                           ▼                         ▼
+                   L298N H-bridge            steering servo
+                 7.4 V drive motor
 ```
 
 A camera finds each car, the policy decides where to go, the ESP32 drives the
 motors. Every hop has a failsafe: if poses stop arriving, or commands stop
-arriving, the car stops on its own.
+arriving, the car stops on its own. One Orin can also run both halves.
 
 ## The two bundles
 
@@ -40,19 +41,21 @@ Both are self-contained: clone, run the selftest, bring it up.
 
 ## Start here
 
+Everything is driven by one CLI, `./arena` (Windows: `arena.cmd`):
+
 ```bash
-git clone git@github.com:Maviman/ee198-deployment-bundles.git
-cd ee198-deployment-bundles/portable_orin_perception
-python3 selftest.py        # run this before installing anything
-./setup_orin.sh            # installs ROS 2 + builds
+./arena sim            # rehearse the whole stack on this machine, no hardware
+./arena init --vision <user>@<orin> --control <user>@<orin>     # then, per session:
+./arena sync && ./arena scan && ./arena up && ./arena go         # ... halt / stop
 ```
 
-Then follow the bring-up ladder in whichever bundle you're working on — each
-README walks from "no hardware at all" up to "real car, wheels off the ground."
+**[ARENA.md](ARENA.md) is the runbook**: the two-Orin split, first-time setup,
+the session commands, the dashboard, and what was changed to cut latency.
 
 | If you want to… | Read |
 |---|---|
-| Run both bundles on one Jetson (the demo runbook) | [ORIN_DEPLOYMENT.md](ORIN_DEPLOYMENT.md) |
+| Run the arena (two Orins, or one), day to day | [ARENA.md](ARENA.md) |
+| Bring up one Jetson by hand, step by step | [ORIN_DEPLOYMENT.md](ORIN_DEPLOYMENT.md) |
 | Get the camera calibrated fast | [ORIN_QUICKSTART.md](ORIN_QUICKSTART.md) |
 | Learn the ROS 2 concepts this uses | [ROS2_LEARNING.md](portable_orin_perception/ROS2_LEARNING.md) |
 | Know what's planned and what's blocked | [HANDOFF.md](HANDOFF.md) |
@@ -76,7 +79,8 @@ Two things will bite you if you don't know them going in:
 - **The arena is part of the model.** The policies were trained in a 14 × 10 m
   arena and the observation scaling bakes that in. A different real arena size
   means retraining, not just a config edit.
-- **Perception is at its resolution limit.** At 640×480 the 7 cm car markers
-  land around 24 px — right at the ArUco detection floor. Making the arena
-  bigger needs more than a wider lens. [HANDOFF.md](HANDOFF.md) has the
-  measurements and the options.
+- **Tag pixels set the resolution.** A square arena fits the image's short
+  side, so 7 cm car tags are ~18 px at 640×480 (below the detection floor) and
+  ~25 px at the new 1280×720 default. `arena scan` measures the real number
+  and says whether it is enough. [HANDOFF.md](HANDOFF.md) has the options for
+  a bigger arena.

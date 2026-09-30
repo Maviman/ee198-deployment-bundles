@@ -15,12 +15,13 @@ setup(
     zip_safe=True,
     maintainer="Jordan Fronko",
     maintainer_email="themane213@gmail.com",
-    description="Overhead ArUco perception: camera images -> arena-frame vehicle poses -> UDP pose frames for the pursuit controller.",
+    description="Overhead fiducial perception (ArUco or AprilTag): camera images -> arena-frame vehicle poses -> UDP pose frames for the pursuit controller.",
     license="Proprietary (EE198 course project)",
     tests_require=["pytest"],
     entry_points={
         "console_scripts": [
             "aruco_detector = hive_perception.aruco_detector_node:main",
+            "gst_camera = hive_perception.gst_camera_node:main",
             "pose_bridge = hive_perception.pose_bridge_node:main",
             "calibrate_arena = hive_perception.calibrate_arena:main",
         ],

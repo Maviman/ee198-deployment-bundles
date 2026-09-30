@@ -1,5 +1,6 @@
 """Bring-up aid: live version of snapshot_arena_debug.py. Continuously reads
-the overhead camera, runs the SAME ArUco detection aruco_detector_node uses,
+the overhead camera, runs the SAME detection aruco_detector_node uses (same subset
+dictionary, so both what it finds and what it costs match the node),
 and shows a window with detected marker boundaries/ids plus the calibrated
 arena rectangle (projected back into pixels via the fitted homography) —
 updated every frame, so you can watch it while physically adjusting the
@@ -55,8 +56,12 @@ def main() -> None:
                           "(usb_cam_node_exe, rqt_image_view) already using it?")
 
     marker_map = load_marker_map(args.marker_map)
-    dictionary = cv2.aruco.getPredefinedDictionary(getattr(cv2.aruco, marker_map.dictionary))
-    detector = cv2.aruco.ArucoDetector(dictionary, cv2.aruco.DetectorParameters())
+    # Same SUBSET dictionary aruco_detector_node builds, so this tool matches the
+    # node in both what it detects and what it costs. detectMarkers() therefore
+    # returns row indices -> translate with tag_set.to_real_id() before use.
+    tag_set = marker_map.tag_set()
+    detector = cv2.aruco.ArucoDetector(
+        tag_set.build_opencv_dictionary(), cv2.aruco.DetectorParameters())
 
     arena_px = None
     boundary_note = "no arena_homography.yaml yet — run calibrate_arena.sh for the boundary overlay"
@@ -83,14 +88,17 @@ def main() -> None:
 
             out = frame
             if ids is not None:
-                cv2.aruco.drawDetectedMarkers(out, corners, ids)
+                # Label with PRINTED ids, not the subset's row indices.
+                cv2.aruco.drawDetectedMarkers(out, corners, np.array(
+                    [[tag_set.to_real_id(int(i))] for i in ids.flatten()], dtype=np.int32))
             if arena_px is not None:
                 cv2.polylines(out, [arena_px], isClosed=True, color=(0, 255, 255), thickness=2)
                 for (x, y) in arena_px:
                     cv2.circle(out, (x, y), 4, (0, 255, 255), -1)
 
             n_found = 0 if ids is None else len(ids)
-            found_ids = [] if ids is None else sorted(int(i) for i in ids.flatten())
+            found_ids = [] if ids is None else sorted(
+                tag_set.to_real_id(int(i)) for i in ids.flatten())
             label = f"detected: {n_found} marker(s) {found_ids}  |  {boundary_note}"
             cv2.putText(out, label, (8, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 3)
             cv2.putText(out, label, (8, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)

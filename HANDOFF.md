@@ -87,6 +87,38 @@ This matters more than it looks:
 
 ## Item 2 — Overhead camera FOV + resolution tooling
 
+> **STATUS 2026-08-22 — partly executed; read this before the section below.**
+> The AprilTag tag36h11 path and the CUDA groundwork are in, with the family
+> switch itself left opt-in in `config/marker_map.yaml` (flipping it invalidates
+> every printed sheet, so it is not something a pull should do). What changed,
+> and what it invalidates here:
+>
+> - **`detectMarkers` is no longer the ceiling this section assumes.** Detection
+>   now runs against a *subset* dictionary of only the printed ids
+>   (`core/tag_family.py`). At 1280×720: ArUco 5.99 ms, full-codebook 36h11
+>   37.34 ms, **8-code subset 4.65 ms** — cheaper than the ArUco baseline. The
+>   CPU argument against higher resolution is substantially weaker than written
+>   below.
+> - **The "1280×720 doesn't fit" finding conflated two variables.** That config
+>   was 720p at **30** fps: 33.3 ms budget vs ~41.8 ms work = 125% loaded, which
+>   is the ~150% CPU and the growing staleness. At 15 fps it is ~63% of a core,
+>   ~43% with clocks pinned. The controller only needs 10 Hz.
+> - **The pixel floor moved the wrong way and is now measured, not assumed.**
+>   36h11 is 8 modules across vs ArUco's 6. Measured detection rate: 36h11 needs
+>   20 px sharp, **28 px under motion blur**. A 7 cm tag is 24 px at 640×480 —
+>   below the floor. `tools/generate_tags.py` prints this verdict before every
+>   print run and currently reports TOO SMALL at 640×480.
+> - **Tooling that now exists:** `tools/probe_orin_gpu.py` (inventory +
+>   benchmarks for CUDA/VPI/NVJPEG/GStreamer/Isaac ROS on the real board),
+>   `gst_camera` node (hardware NVJPG decode, no Isaac ROS needed),
+>   `tools/generate_tags.py` (family-agnostic sheets + pixel budget).
+> - **Still open exactly as written below:** the crop-vs-bin question for this
+>   camera, the true-FOV-from-intrinsics reporting, and the five-way resolution
+>   duplication (`camera_info.yaml` still says 1280×720 — though `gst_camera`
+>   now *refuses* to publish intrinsics whose resolution disagrees with capture,
+>   instead of silently scaling every pose).
+
+
 **Goal:** the overhead camera should see more of the field, and there should be
 a separate set of programs letting a user edit the camera's FOV and resolution —
 expressed in normal industry units, not a normalized 0-to-1 knob.
@@ -155,12 +187,12 @@ before building anything.
 
 Known values today: capture is **640×480 @ 15 fps**
 (`perception.launch.py:53`), the test arena is **1.83 × 1.83 m**
-(`config/arena_test_6ft.yaml`), dictionary `DICT_4X4_50`
+(`config/arena_test_6ft.yaml`), dictionary `DICT_APRILTAG_36h11` since 2026-08-22, `DICT_4X4_50` before that
 (`config/marker_map.yaml`).
 
 Marker sizes differ by role, and **the binding number is the vehicle marker**,
 since that is what has to stay detected continuously during a run
-(`tools/generate_aruco_markers.py:30`):
+(`tools/generate_tags.py`):
 
 - vehicle markers (ids 0–3): **7 cm** — sized to fit an 8.9 cm car roof
 - calibration corners (ids 10–13): 10 cm — only needed during calibration

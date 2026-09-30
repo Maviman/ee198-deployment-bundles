@@ -1,5 +1,5 @@
-"""Bring-up aid: grab one frame from the overhead camera, run the SAME ArUco
-detection the real aruco_detector_node uses, and draw what it saw — detected
+"""Bring-up aid: grab one frame from the overhead camera, run the SAME detection
+the real aruco_detector_node uses (same subset dictionary), and draw what it saw — detected
 marker boundaries/ids plus the calibrated arena rectangle (projected back into
 pixels via the fitted homography). Answers "is the camera/marker/calibration
 setup actually correct?" without spinning up ROS or trusting numbers blind.
@@ -60,14 +60,20 @@ def main() -> None:
     cap.release()
 
     marker_map = load_marker_map(args.marker_map)
-    dictionary = cv2.aruco.getPredefinedDictionary(getattr(cv2.aruco, marker_map.dictionary))
-    detector = cv2.aruco.ArucoDetector(dictionary, cv2.aruco.DetectorParameters())
+    # Same SUBSET dictionary aruco_detector_node builds, so this tool matches the
+    # node in both what it detects and what it costs. detectMarkers() therefore
+    # returns row indices -> translate with tag_set.to_real_id() before use.
+    tag_set = marker_map.tag_set()
+    detector = cv2.aruco.ArucoDetector(
+        tag_set.build_opencv_dictionary(), cv2.aruco.DetectorParameters())
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     corners, ids, _rejected = detector.detectMarkers(gray)
 
     out = frame.copy()
     if ids is not None:
-        cv2.aruco.drawDetectedMarkers(out, corners, ids)
+        # Label with PRINTED ids, not the subset's row indices.
+        cv2.aruco.drawDetectedMarkers(out, corners, np.array(
+            [[tag_set.to_real_id(int(i))] for i in ids.flatten()], dtype=np.int32))
 
     if Path(args.homography).exists():
         arena_cfg = yaml.safe_load(Path(args.arena_config).read_text())
@@ -85,7 +91,8 @@ def main() -> None:
         boundary_note = "no arena_homography.yaml yet — run calibrate_arena.sh for the boundary overlay"
 
     n_found = 0 if ids is None else len(ids)
-    found_ids = [] if ids is None else sorted(int(i) for i in ids.flatten())
+    found_ids = [] if ids is None else sorted(
+        tag_set.to_real_id(int(i)) for i in ids.flatten())
     label = f"detected: {n_found} marker(s) {found_ids}  |  {boundary_note}"
     cv2.putText(out, label, (8, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 3)
     cv2.putText(out, label, (8, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)

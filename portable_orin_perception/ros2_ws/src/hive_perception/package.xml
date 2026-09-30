@@ -3,7 +3,7 @@
 <package format="3">
   <name>hive_perception</name>
   <version>0.1.0</version>
-  <description>Overhead ArUco perception for the EE198 pursuit project: camera images to arena-frame vehicle poses to UDP pose frames for the pursuit controller.</description>
+  <description>Overhead fiducial perception (ArUco or AprilTag tag36h11) for the EE198 pursuit project: camera images to arena-frame vehicle poses to UDP pose frames for the pursuit controller.</description>
   <maintainer email="themane213@gmail.com">Jordan Fronko</maintainer>
   <license>Proprietary (EE198 course project)</license>
 

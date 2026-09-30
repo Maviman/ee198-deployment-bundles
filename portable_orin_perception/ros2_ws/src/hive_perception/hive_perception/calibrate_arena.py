@@ -52,22 +52,30 @@ def load_ros_camera_info(path) -> tuple[np.ndarray | None, np.ndarray | None]:
         return None, None
 
 
-def collect_marker_centers(images, dictionary_name: str, wanted_ids: list[int],
+def collect_marker_centers(images, tag_set, wanted_ids: list[int],
                            min_detections: int = 3) -> dict[int, np.ndarray]:
-    """Detect calibration markers across frames; return id -> mean center px."""
+    """Detect calibration markers across frames; return id -> mean center px.
+
+    ``tag_set`` must be the marker map's own TagSet (marker_map.tag_set()), the
+    same one the detector node builds: detections come back as subset ROW
+    INDICES, and translating them with a different tag set would silently
+    mislabel which corner is which — a calibration that then looks fine but
+    maps the arena inside out.
+    """
     import cv2
 
-    dictionary = cv2.aruco.getPredefinedDictionary(getattr(cv2.aruco, dictionary_name))
-    detector = cv2.aruco.ArucoDetector(dictionary, cv2.aruco.DetectorParameters())
+    detector = cv2.aruco.ArucoDetector(
+        tag_set.build_opencv_dictionary(), cv2.aruco.DetectorParameters())
     seen: dict[int, list[np.ndarray]] = {i: [] for i in wanted_ids}
     for img in images:
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
         corners, ids, _ = detector.detectMarkers(gray)
         if ids is None:
             continue
-        for marker_corners, marker_id in zip(corners, ids.flatten()):
-            if int(marker_id) in seen:
-                seen[int(marker_id)].append(marker_math.marker_center_px(marker_corners))
+        for marker_corners, row in zip(corners, ids.flatten()):
+            marker_id = tag_set.to_real_id(int(row))
+            if marker_id in seen:
+                seen[marker_id].append(marker_math.marker_center_px(marker_corners))
     centers = {}
     for vid, hits in seen.items():
         if len(hits) >= min(min_detections, len(images)):
@@ -133,7 +141,7 @@ def main(argv=None) -> None:
         images = grab_frames(args.device, args.frames, args.width, args.height)
     print(f"collected {len(images)} frame(s) at {images[0].shape[1]}x{images[0].shape[0]}")
 
-    centers = collect_marker_centers(images, marker_map.dictionary, corner_ids)
+    centers = collect_marker_centers(images, marker_map.tag_set(), corner_ids)
     not_seen = [i for i in corner_ids if i not in centers]
     if not_seen:
         sys.exit(f"calibration markers not detected reliably: ids {not_seen} — "

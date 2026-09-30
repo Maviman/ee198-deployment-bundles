@@ -31,6 +31,13 @@ camera or refocus.
 
 ## 2. Arena homography — ~2 min, redo every time the camera moves
 
+> **Tags are ArUco `DICT_4X4_50`** — unchanged, your existing printed sheets
+> still work. An AprilTag tag36h11 migration is ready to switch on in
+> `config/marker_map.yaml` (one line, procedure documented there); it requires
+> reprinting every sheet and re-running this calibration, so it is opt-in.
+> Run `./preflight.sh` after any pull to confirm sheets, calibration and
+> capture resolution still agree.
+
 1. Place markers `10,11,12,13` (the 10cm sheets in `markers/`) - id 10
    top-left, clockwise (11 top-right, 12 bottom-right, 13 bottom-left), per
    `config/arena_test_6ft.yaml`.

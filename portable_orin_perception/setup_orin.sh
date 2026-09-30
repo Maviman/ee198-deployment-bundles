@@ -47,7 +47,7 @@ sudo apt-get install -y \
     python3-opencv python3-numpy python3-yaml \
     chrony v4l-utils
 
-echo "== [4/6] Checking OpenCV ArUco =="
+echo "== [4/6] Checking OpenCV fiducial support =="
 python3 - <<'PY'
 import cv2
 ok = hasattr(cv2, "aruco") and hasattr(cv2.aruco, "ArucoDetector")
@@ -57,6 +57,28 @@ if not ok:
         "cv2.aruco.ArucoDetector missing (OpenCV < 4.7?). Fix with:\n"
         "  pip3 install --user opencv-contrib-python\n"
         "then re-run this script.")
+
+# Check the family the marker map ACTUALLY names, not a hard-coded one -- the
+# family is a config choice (ArUco today, AprilTag tag36h11 once the sheets are
+# reprinted) and this script must not demand whichever one it was written for.
+import pathlib, yaml
+cfg = pathlib.Path("config/marker_map.yaml")
+family = yaml.safe_load(cfg.read_text(encoding="utf-8"))["dictionary"] if cfg.exists() else None
+if family:
+    if not hasattr(cv2.aruco, family):
+        raise SystemExit(
+            f"cv2.aruco.{family} missing -- this OpenCV build cannot detect or generate\n"
+            f"the family named in {cfg}. Fix with:\n"
+            "  pip3 install --user opencv-contrib-python\n"
+            "then re-run this script.")
+    d = cv2.aruco.getPredefinedDictionary(getattr(cv2.aruco, family))
+    print(f"{family}: {d.bytesList.shape[0]} tags, {d.markerSize}x{d.markerSize} data bits")
+    # The subset-dictionary constructor is the exact API the detector depends on
+    # and is newer than ArucoDetector itself, so prove it here rather than at
+    # the first camera frame.
+    import numpy as np
+    probe = cv2.aruco.Dictionary(np.ascontiguousarray(d.bytesList[:2, :, :]), d.markerSize, 0)
+    print(f"subset-dictionary API: OK ({probe.bytesList.shape[0]} rows)")
 PY
 
 echo "== [5/6] rosdep =="

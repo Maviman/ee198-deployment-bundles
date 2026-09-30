@@ -16,6 +16,22 @@ python3 selftest.py       # ROS not needed yet — must print SELFTEST PASSED
 New to ROS 2? Read `ROS2_LEARNING.md` alongside — every concept this bundle
 uses is mapped to the exact file where it appears.
 
+## Two ways to run: the fast path and the ROS pipeline
+
+**`run_vision.py` (the deployment path, what `arena up` runs):** one process,
+camera → luma-only JPEG decode → `core/localizer.py` (detector tuned to the
+known tag size, tracking windows, plausibility gates) → a pose frame sent the
+instant each frame is processed. No DDS image hop, no 10 Hz resampling timer,
+newest-frame-only so overload drops frames instead of aging them. Capture
+mode from `config/camera.yaml`; calibration from `arena scan`
+(`scan_arena.py`). See [ARENA.md](../ARENA.md).
+
+**`run_perception.sh` (ROS 2):** the same `Localizer` inside
+`aruco_detector_node`, the same `camera.yaml` defaults. Use it for rviz,
+rosbag, and learning ROS. Everything below about the ROS nodes still applies.
+
+Tests for the fast path: `python -m pytest tests -q`.
+
 ## What's in here
 
 | Path | What it is |
@@ -227,9 +243,11 @@ on-screen tag size (rotated synthetic tags):
 | 28 | 100% | 100% | 100% |
 
 Blurred is the real case for a moving car, so **28 px is the number to design
-against**. A 7 cm tag in the 1.83 m arena is 24 px at 640×480 and 49 px at
-1280×720. `tools/generate_tags.py` prints this verdict before every print run,
-and it currently says **TOO SMALL at 640×480**.
+against**. A 7 cm tag in the square 1.83 m arena, which must fit the image's
+short side, is ~17-18 px at 640×480 and ~25 px at 1280×720 (the width-based
+24 / 49 px quoted here before overstated it). `arena scan` measures it from the
+real calibration. `tools/generate_tags.py` prints a verdict before every print
+run, and it says **TOO SMALL at 640×480**.
 
 So the family switch and the resolution increase are one decision, not two.
 That is affordable precisely because the subset dictionary and the hardware

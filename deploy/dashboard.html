@@ -1,0 +1,317 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Arena</title>
+<style>
+  :root {
+    --bg: #0e1116; --panel: #161b22; --line: #262d36; --text: #d6dde6; --dim: #8592a3;
+    --ok: #3fb950; --warn: #d29922; --err: #f85149; --accent: #58a6ff; --evader: #ff7b72;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+           padding: 10px 16px; border-bottom: 1px solid var(--line); position: sticky; top: 0;
+           background: var(--bg); z-index: 2; }
+  h1 { font-size: 16px; margin: 0; letter-spacing: .08em; }
+  .pill { padding: 3px 10px; border-radius: 999px; font-weight: 700; font-size: 12px;
+          letter-spacing: .06em; border: 1px solid currentColor; }
+  .big { font: 700 22px var(--mono); }
+  .sub { color: var(--dim); font-size: 12px; }
+  .spacer { flex: 1; }
+  button.stop { background: var(--err); color: #fff; border: 0; border-radius: 6px;
+                font: 800 15px system-ui; padding: 10px 22px; cursor: pointer; letter-spacing: .08em; }
+  button.stop:active { transform: translateY(1px); }
+  main { padding: 12px 16px; display: grid; gap: 12px;
+         grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px;
+           min-width: 0; }
+  .panel h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--dim);
+              margin: 0 0 8px; font-weight: 600; }
+  #alerts { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 4px; }
+  .alert { padding: 6px 10px; border-radius: 6px; border-left: 4px solid; background: #1c2129; }
+  .alert.warn { border-color: var(--warn); } .alert.error { border-color: var(--err); }
+  .alert.okay { border-color: var(--ok); color: var(--dim); }
+  .cam { position: relative; background: #000; border-radius: 6px; overflow: hidden; aspect-ratio: 16/9; }
+  .cam img, .cam canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+  .cam .none { position: absolute; inset: 0; display: grid; place-items: center; color: var(--dim); }
+  #map { width: 100%; aspect-ratio: 1; display: block; }
+  .row3 { grid-column: 1 / -1; display: grid; gap: 12px;
+          grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
+  table { width: 100%; border-collapse: collapse; font: 12px var(--mono); }
+  th { text-align: left; color: var(--dim); font-weight: 500; padding: 3px 4px; }
+  td { padding: 3px 4px; border-top: 1px solid var(--line); white-space: nowrap; }
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; font: 12px var(--mono); }
+  .kv span:nth-child(odd) { color: var(--dim); }
+  .bar { height: 18px; display: flex; border-radius: 4px; overflow: hidden; background: #0b0e12;
+         position: relative; margin: 6px 0 2px; }
+  .bar div { height: 100%; }
+  .budget { position: absolute; top: -3px; bottom: -3px; width: 2px; background: var(--err); }
+  .legend { display: flex; gap: 12px; flex-wrap: wrap; font-size: 12px; color: var(--dim); }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px;
+              vertical-align: -1px; }
+  #spark { width: 100%; height: 60px; display: block; }
+  .ok { color: var(--ok); } .warn { color: var(--warn); } .err { color: var(--err); }
+  .tablewrap { overflow-x: auto; }
+  .cmdbar { display: inline-block; width: 36px; height: 8px; background: #0b0e12; position: relative;
+            vertical-align: middle; border-radius: 2px; }
+  .cmdbar b { position: absolute; top: 0; bottom: 0; background: var(--accent); }
+  .cmdbar::after { content: ""; position: absolute; left: 50%; top: -2px; bottom: -2px; width: 1px;
+                   background: var(--dim); }
+  #events { font: 12px var(--mono); color: var(--dim); max-height: 160px; overflow: auto; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>ARENA</h1>
+  <span id="state" class="pill">OFFLINE</span>
+  <span class="sub" id="model"></span>
+  <span class="spacer"></span>
+  <div title="camera capture -> command on the radio (p50 / p95), measured every tick">
+    <div class="sub">camera &rarr; command</div>
+    <div class="big" id="e2e">&ndash;</div>
+  </div>
+  <div title="control ticks per second (policy trained at 10 Hz)">
+    <div class="sub">tick</div>
+    <div class="big" id="tick">&ndash;</div>
+  </div>
+  <button class="stop" id="stop" title="E-stop every car now (keeps services running; re-arm with `arena go`)">STOP</button>
+</header>
+<main>
+  <section id="alerts"></section>
+  <section class="panel">
+    <h2>Overhead camera <span class="sub" id="camsub"></span></h2>
+    <div class="cam"><img id="video" alt=""><canvas id="overlay"></canvas>
+      <div class="none" id="novideo">no preview (vision service not running?)</div></div>
+  </section>
+  <section class="panel">
+    <h2>Arena <span class="sub" id="mapsub"></span></h2>
+    <canvas id="map" width="600" height="600"></canvas>
+  </section>
+  <div class="row3">
+    <section class="panel">
+      <h2>Latency (p50)</h2>
+      <div class="bar" id="latbar"><span class="budget" id="budget"></span></div>
+      <div class="legend" id="latlegend"></div>
+      <canvas id="spark" width="600" height="60"></canvas>
+      <div class="sub">camera &rarr; command p50, last ~60 s. Red line = 100 ms budget.</div>
+    </section>
+    <section class="panel">
+      <h2>Cars</h2>
+      <div class="tablewrap"><table><thead><tr><th>#</th><th>address</th><th>throttle</th><th>steer</th><th>rtt</th><th>rssi</th><th></th></tr></thead>
+        <tbody id="cars"></tbody></table></div>
+    </section>
+    <section class="panel">
+      <h2>Vision</h2>
+      <div class="kv" id="vision"></div>
+    </section>
+    <section class="panel">
+      <h2>Events</h2>
+      <div id="events"></div>
+    </section>
+  </div>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const COLORS = { vision: "#58a6ff", control: "#a371f7", radio: "#3fb950" };
+let S = null, videoOn = false;
+
+let stopError = null;
+$("stop").onclick = async () => {
+  $("stop").textContent = "STOPPING…";
+  let msg = null;
+  try {
+    const r = await fetch("/api/stop", { method: "POST" });
+    const j = await r.json();
+    if (!r.ok || j.error || j.armed !== false) msg = j.error || "unexpected reply " + JSON.stringify(j);
+  } catch (e) { msg = "hub unreachable: " + e; }
+  // A failed STOP must never look like a successful one.
+  stopError = msg ? `STOP FAILED: ${msg}. Use \`arena halt\`, or cut power to the cars.` : null;
+  $("stop").textContent = msg ? "STOP FAILED" : "STOPPED";
+  setTimeout(() => ($("stop").textContent = "STOP"), msg ? 5000 : 1200);
+  if (S) render();
+};
+
+function pct(v) { return v == null ? "–" : v.toFixed(0) + "%"; }
+function ms(v, d = 1) { return v == null ? "–" : v.toFixed(d) + " ms"; }
+function fresh(src) { return S && S.age && S.age[src] != null && S.age[src] < 2; }
+
+function drawOverlay() {
+  const cv = $("overlay"), img = $("video"), v = S && S.vision;
+  const r = cv.getBoundingClientRect();
+  cv.width = r.width * devicePixelRatio; cv.height = r.height * devicePixelRatio;
+  const g = cv.getContext("2d");
+  g.clearRect(0, 0, cv.width, cv.height);
+  if (!v || !v.img || !fresh("vision")) return;
+  const [iw, ih] = v.img;
+  const s = Math.min(cv.width / iw, cv.height / ih);
+  const ox = (cv.width - iw * s) / 2, oy = (cv.height - ih * s) / 2;
+  const P = (x, y) => [ox + x * s, oy + y * s];
+  g.lineWidth = 2 * devicePixelRatio;
+  if (v.arena_px) {
+    g.strokeStyle = "rgba(255,221,0,.8)"; g.beginPath();
+    v.arena_px.forEach(([x, y], i) => { const [a, b] = P(x, y); i ? g.lineTo(a, b) : g.moveTo(a, b); });
+    g.closePath(); g.stroke();
+  }
+  const roles = v.roles || {};
+  g.font = `${12 * devicePixelRatio}px ui-monospace, monospace`;
+  for (const [id, c] of v.dets || []) {
+    const role = roles[String(id)];
+    g.strokeStyle = role === "EVADER" ? "#ff7b72" : role ? "#58a6ff" : "#39c5cf";
+    g.beginPath();
+    for (let i = 0; i < 4; i++) { const [a, b] = P(c[2 * i], c[2 * i + 1]); i ? g.lineTo(a, b) : g.moveTo(a, b); }
+    g.closePath(); g.stroke();
+    const [a, b] = P(c[0], c[1]);
+    g.fillStyle = g.strokeStyle; g.fillText(`${role || "tag"} ${id}`, a + 4, b - 6);
+  }
+}
+
+function drawMap() {
+  const cv = $("map"), g = cv.getContext("2d");
+  const W = cv.width, H = cv.height;
+  g.clearRect(0, 0, W, H);
+  const v = S && S.vision, c = S && S.control;
+  const [hw, hh] = (v && v.arena) || [0.915, 0.915];
+  const s = Math.min(W / (2 * hw), H / (2 * hh)) * 0.9;
+  const X = (x) => W / 2 + x * s, Y = (y) => H / 2 - y * s;
+  g.strokeStyle = "#262d36"; g.lineWidth = 1;
+  for (let x = -Math.floor(hw / 0.5) * 0.5; x <= hw; x += 0.5) { g.beginPath(); g.moveTo(X(x), Y(-hh)); g.lineTo(X(x), Y(hh)); g.stroke(); }
+  for (let y = -Math.floor(hh / 0.5) * 0.5; y <= hh; y += 0.5) { g.beginPath(); g.moveTo(X(-hw), Y(y)); g.lineTo(X(hw), Y(y)); g.stroke(); }
+  g.strokeStyle = "#ffdd00"; g.lineWidth = 2; g.strokeRect(X(-hw), Y(hh), 2 * hw * s, 2 * hh * s);
+  const roles = (v && v.roles) || {};
+  for (const [id, pts] of Object.entries((S && S.trails) || {})) {
+    g.strokeStyle = roles[id] === "EVADER" ? "rgba(255,123,114,.45)" : "rgba(88,166,255,.45)";
+    g.lineWidth = 2; g.beginPath();
+    let pen = false;
+    for (const p of pts) {
+      if (!p) { pen = false; continue; }
+      pen ? g.lineTo(X(p[0]), Y(p[1])) : g.moveTo(X(p[0]), Y(p[1])); pen = true;
+    }
+    g.stroke();
+  }
+  const cars = [];
+  if (v && fresh("vision")) for (const veh of v.vehicles || []) if (veh.x != null)
+    cars.push({ x: veh.x, y: veh.y, h: veh.h, label: veh.role, ev: veh.role === "EVADER", seen: veh.seen });
+  if (c && c.poses && c.capture_radius) {
+    const [ex, ey] = c.poses.evader;
+    g.strokeStyle = "rgba(255,123,114,.6)"; g.setLineDash([5, 5]); g.beginPath();
+    g.arc(X(ex), Y(ey), c.capture_radius * s, 0, 2 * Math.PI); g.stroke(); g.setLineDash([]);
+  }
+  for (const car of cars) {
+    const L = 0.19 * s * 0.6;
+    g.save(); g.translate(X(car.x), Y(car.y)); g.rotate(-car.h);
+    g.fillStyle = car.ev ? "#ff7b72" : "#58a6ff"; g.globalAlpha = car.seen ? 1 : 0.35;
+    g.beginPath(); g.moveTo(L, 0); g.lineTo(-L * 0.7, L * 0.55); g.lineTo(-L * 0.7, -L * 0.55); g.closePath(); g.fill();
+    g.restore();
+    g.fillStyle = "#d6dde6"; g.font = "13px system-ui"; g.fillText(car.label, X(car.x) + 12, Y(car.y) - 10);
+  }
+  if (c && c.dist) $("mapsub").textContent = "distance to evader: " + c.dist.map((d) => d.toFixed(2) + " m").join(", ")
+    + (c.capture_radius ? ` · dashed ring = the policy's capture radius (${c.capture_radius.toFixed(2)} m)` : "");
+}
+
+function drawSpark() {
+  const cv = $("spark"), g = cv.getContext("2d"), W = cv.width, H = cv.height;
+  g.clearRect(0, 0, W, H);
+  const pts = ((S && S.series) || []).filter((p) => p[1] != null);
+  const top = 120;
+  const yb = H - (100 / top) * H;
+  g.strokeStyle = "#f85149"; g.setLineDash([4, 4]); g.beginPath(); g.moveTo(0, yb); g.lineTo(W, yb); g.stroke(); g.setLineDash([]);
+  if (pts.length < 2) return;
+  const t0 = pts[0][0], t1 = pts[pts.length - 1][0] || t0 + 1;
+  g.strokeStyle = "#58a6ff"; g.lineWidth = 2; g.beginPath();
+  pts.forEach(([t, v], i) => { const x = ((t - t0) / Math.max(t1 - t0, 1)) * W, y = H - (Math.min(v, top) / top) * H;
+    i ? g.lineTo(x, y) : g.moveTo(x, y); });
+  g.stroke();
+}
+
+function render() {
+  const v = S.vision, c = S.control;
+  const st = $("state");
+  let label = "OFFLINE", color = "var(--dim)";
+  if (c && fresh("control")) {
+    if (c.state === "STALLED") { label = "STALLED"; color = "var(--err)"; }
+    else if (c.armed) { label = "ARMED"; color = "var(--ok)"; }
+    else { label = "DISARMED"; color = "var(--warn)"; }
+  }
+  st.textContent = label; st.style.color = color;
+  $("model").textContent = c ? `${c.model} · ${c.n} pursuer${c.n > 1 ? "s" : ""}` : "";
+  const tot = c && c.lat_ms && c.lat_ms.total;
+  $("e2e").innerHTML = tot && tot.p50 != null ? `${tot.p50.toFixed(0)} <span class="sub">/ ${tot.p95.toFixed(0)} ms</span>` : "–";
+  const per = c && c.period_ms;
+  $("tick").innerHTML = per && per.p50 ? `${(1000 / per.p50).toFixed(1)} <span class="sub">Hz</span>` : "–";
+
+  const al = (stopError ? [{ level: "error", text: stopError }] : []).concat(S.alerts || []);
+  $("alerts").innerHTML = al.length
+    ? al.map((a) => `<div class="alert ${a.level}">${a.text}</div>`).join("")
+    : `<div class="alert okay">all nominal</div>`;
+
+  if (S.preview && fresh("vision") && !videoOn) { $("video").src = "/video.mjpg?" + Date.now(); videoOn = true; }
+  if (!fresh("vision") && videoOn) { $("video").removeAttribute("src"); videoOn = false; }
+  $("novideo").style.display = videoOn ? "none" : "grid";
+  if (v) $("camsub").textContent = `${v.mode} · ${v.fps} fps · ${v.source}`;
+
+  // latency breakdown
+  const vis = c && c.lat_ms && c.lat_ms.vision && c.lat_ms.vision.p50;
+  const ctl = c && c.lat_ms && c.lat_ms.control && c.lat_ms.control.p50;
+  const rtts = ((c && c.cars) || []).map((x) => x.rtt_ms).filter((x) => x != null);
+  const radio = rtts.length ? rtts.reduce((a, b) => a + b, 0) / rtts.length / 2 : null;
+  const parts = [["camera → pose sent", vis, COLORS.vision], ["controller", ctl, COLORS.control], ["radio (½ RTT)", radio, COLORS.radio]];
+  const scale = 120;
+  $("latbar").innerHTML = parts.map(([_, x, col]) => x == null ? "" : `<div style="width:${(100 * x) / scale}%;background:${col}"></div>`).join("")
+    + `<span class="budget" style="left:${(100 * 100) / scale}%"></span>`;
+  $("latlegend").innerHTML = parts.map(([n, x, col]) => `<span><i style="background:${col}"></i>${n} ${ms(x)}</span>`).join("");
+
+  // cars
+  const cmd = (c && c.cmd) || [];
+  $("cars").innerHTML = ((c && c.cars) || []).map((car) => {
+    const thr = cmd[2 * car.idx], str = cmd[2 * car.idx + 1];
+    const bar = (x) => x == null ? "–" : `<span class="cmdbar"><b style="${x >= 0 ? `left:50%;width:${50 * x}%` : `right:50%;width:${-50 * x}%`}"></b></span> ${x.toFixed(2)}`;
+    const ok = car.ack_age_s != null && car.ack_age_s < 1;
+    return `<tr><td>${car.idx}</td><td>${car.addr}</td><td>${bar(thr)}</td><td>${bar(str)}</td>
+      <td class="${car.rtt_ms > 40 ? "warn" : ""}">${ms(car.rtt_ms)}</td>
+      <td class="${car.rssi < -75 ? "warn" : ""}">${car.rssi ?? "–"}</td>
+      <td class="${ok ? "ok" : "err"}">${ok ? "●" : "no ack"}</td></tr>`;
+  }).join("") || `<tr><td colspan="7" class="sub">no controller</td></tr>`;
+
+  // vision
+  if (v) {
+    const m = v.ms || {}, h = v.host || {};
+    const kv = [
+      ["status", v.status],
+      ["fps", `${v.fps} / ${v.mode.split("@")[1]}`],
+      ["decode", `${ms(m.decode && m.decode.p50, 2)} (p95 ${ms(m.decode && m.decode.p95, 2)})`],
+      ["detect", `${ms(m.detect && m.detect.p50, 2)} (p95 ${ms(m.detect && m.detect.p95, 2)})`],
+      ["capture→sent", `${ms(m.lat && m.lat.p50)} (p95 ${ms(m.lat && m.lat.p95)})`],
+      ["tracking", `${pct(v.roi_pct)} of frames in windows, ${v.rescues} rescues`],
+      ["seen", (v.vehicles || []).map((x) => `${x.role} ${pct(x.vis)}`).join("  ")],
+      ["tag size", v.tag_px ? `${v.tag_px[0]}–${v.tag_px[1]} px` : "–"],
+      ["rejected", Object.entries(v.rejected || {}).map(([k, n]) => `${k} ${n}`).join("  ")],
+      ["frames", `${v.sent} sent, ${v.suppressed} suppressed, ${v.skipped} skipped`],
+      ["corner drift", v.drift_px == null ? "not measured" : `${v.drift_px} px`],
+      ["host", (h.cpu_ghz ? `${h.cpu_ghz}/${h.cpu_max_ghz} GHz ${h.clocks_pinned ? "pinned" : "NOT pinned"}, ` : "")
+        + (h.temp_c != null ? `${h.temp_c} °C, ` : "") + `vision process ${h.proc_cpu_pct ?? "–"}% cpu`],
+    ];
+    $("vision").innerHTML = kv.map(([k, x]) => `<span>${k}</span><span>${x ?? "–"}</span>`).join("");
+  }
+  $("events").innerHTML = (S.events || []).slice().reverse().map(([t, e]) => `<div>${t} ${e}</div>`).join("");
+  drawOverlay(); drawMap(); drawSpark();
+}
+
+async function poll() {
+  try {
+    const r = await fetch("/api/state", { cache: "no-store" });
+    S = await r.json(); render();
+  } catch (e) {
+    $("state").textContent = "HUB OFFLINE"; $("state").style.color = "var(--err)";
+  }
+  setTimeout(poll, 150);
+}
+window.addEventListener("resize", () => S && drawOverlay());
+poll();
+</script>
+</body>
+</html>

@@ -73,6 +73,16 @@ python run_controller.py --model models/n1_catch --source udp --pose-port 9870 -
 Dead-man stop is built in: if the pose feed stalls >0.3 s, an E-stop goes out
 and histories reset until frames resume.
 
+The `--source udp` loop (`pc_controller/realtime.py`) is frame-synchronous:
+perception sends every camera frame, and the controller acts on the one nearest
+each 100 ms tick the moment it arrives. It never acts on a pose whose
+perception latency (`lat` in the frame) exceeds `--max-pose-age` (0.15 s).
+`--esp auto` finds the cars by broadcast; `--start-disarmed` +
+`--control-port` give the `arena go` / `arena halt` arm switch; `--telemetry`
+feeds the dashboard. `--legacy-loop` keeps the old tick-per-frame loop for A/B
+comparison. Tests: `python -m pytest tests -q`. `tools/sim_world.py` is a
+simulated arena plus mock fleet (what `arena sim` runs).
+
 ## Wire formats
 
 **PC → ESP command packet** (UDP :8888, one JSON per datagram):
@@ -81,6 +91,12 @@ and histories reset until frames resume.
 ```
 `cmd` = `[throttle, steer]` per car, normalized [-1, 1], +steer = left. The ESP
 ignores `seq` ≤ last applied, goes neutral on `estop` or a 300 ms stream stall.
+
+**Discovery / configuration** (current firmware): `{"probe": 1}` gets
+`{"car", "fw", "mac", "failsafe", "up_s", "last_seq", "rssi", "ota", "duty_max"}`
+back with no effect on the motors; `{"cfg": {"index": n}}` sets CAR_INDEX, but
+only while the car is stopped. OTA updates (`arena flash --ota`) need
+`OTA_PASSWORD` in `wifi_credentials.h` and are only serviced while stopped.
 
 **ESP → PC delivery confirmation** (reply to every parseable packet):
 ```json

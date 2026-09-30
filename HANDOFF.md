@@ -87,6 +87,23 @@ This matters more than it looks:
 
 ## Item 2 — Overhead camera FOV + resolution tooling
 
+> **STATUS 2026-09-29: two corrections and one item done.** See ARENA.md.
+>
+> - **The pixel table below overstates tag size for this arena.** It assumes
+>   the 1.83 m arena spans the image *width*; a square arena has to fit the
+>   *short* side. Real figures: ~17–18 px at 640×480 and ~25 px at 1280×720.
+>   Measured in rendered tests: at 640×480 AprilTag missed 39–63% of sightings
+>   and ArUco ~1%; at 1280×720 both missed none. The default capture is now
+>   1280×720 @ 30. `arena scan` reports the true tag size from the fitted
+>   homography.
+> - **The CPU ceiling is gone at 720p.** The fast path (run_vision.py)
+>   decodes luma only and detects inside tracking windows around each car:
+>   1.41 ms/frame vs 19.9 ms for OpenCV's defaults on the full frame (720p,
+>   one thread, synthetic).
+> - **"One config file holding the camera mode" is done:**
+>   `portable_orin_perception/config/camera.yaml`, read by the fast path, the
+>   ROS launch file, the calibrator, the debug tools and preflight.
+
 > **STATUS 2026-08-22 — partly executed; read this before the section below.**
 > The AprilTag tag36h11 path and the CUDA groundwork are in, with the family
 > switch itself left opt-in in `config/marker_map.yaml` (flipping it invalidates

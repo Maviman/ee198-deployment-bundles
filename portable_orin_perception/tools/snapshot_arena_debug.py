@@ -27,16 +27,19 @@ sys.path.insert(0, str(ROOT / "ros2_ws" / "src" / "hive_perception"))
 
 from hive_perception.core import arena_frame  # noqa: E402
 from hive_perception.core.frame_builder import load_marker_map  # noqa: E402
+from hive_perception.core.camera_config import load_camera_config  # noqa: E402
+
+CAM = load_camera_config(ROOT / "config" / "camera.yaml")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__,
                                       formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--device", default="/dev/video0")
-    parser.add_argument("--width", type=int, default=640,
-                        help="must match perception.launch.py's image_width for the overlay to line up")
-    parser.add_argument("--height", type=int, default=480,
-                        help="must match perception.launch.py's image_height for the overlay to line up")
+    parser.add_argument("--device", default=str(CAM.device))
+    parser.add_argument("--width", type=int, default=CAM.width,
+                        help="default: config/camera.yaml (the overlay only lines up at the calibrated size)")
+    parser.add_argument("--height", type=int, default=CAM.height,
+                        help="default: config/camera.yaml")
     parser.add_argument("--warmup-frames", type=int, default=15,
                         help="frames to discard while auto-exposure settles")
     parser.add_argument("--marker-map", default=str(ROOT / "config" / "marker_map.yaml"))

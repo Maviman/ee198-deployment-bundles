@@ -10,3 +10,8 @@ portable_orin_perception/ros2_ws/build/
 portable_orin_perception/ros2_ws/install/
 portable_orin_perception/ros2_ws/log/
 portable_orin_perception/config/arena_homography.yaml
+
+# Arena deployment: per-site topology, per-room camera overrides, scan output
+deploy/arena.local.conf
+portable_orin_perception/config/camera.local.yaml
+arena_scan.png

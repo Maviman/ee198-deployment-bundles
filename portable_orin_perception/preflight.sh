@@ -110,19 +110,17 @@ if not h.exists():
     sys.exit(2)
 cal = yaml.safe_load(h.read_text(encoding="utf-8"))
 cal_size = cal.get("image_size")
-launch = pathlib.Path("ros2_ws/src/hive_perception/launch/perception.launch.py").read_text(encoding="utf-8")
-def arg(name, default):
-    m = re.search(rf'DeclareLaunchArgument\("{name}",\s*default_value="(\d+)"', launch)
-    return int(m.group(1)) if m else default
-live = [arg("image_width", 640), arg("image_height", 480)]
+from hive_perception.core.camera_config import load_camera_config
+cam = load_camera_config("config/camera.yaml")
+live = [cam.width, cam.height]
 print(f"  [ OK ]  calibration present (max residual "
       f"{cal.get('max_residual_m', '?')} m, calibrated at {cal_size})")
 if cal_size and list(cal_size) != live:
-    print(f"  [FAIL]  calibrated at {cal_size} but the launch default is {live}.")
+    print(f"  [FAIL]  calibrated at {cal_size} but config/camera.yaml captures {live}.")
     print("          A homography is pixel geometry -- using it at another resolution")
-    print("          scales EVERY pose silently. Re-run ./calibrate_arena.sh at the")
-    print(f"          capture size, or launch with image_width:={cal_size[0]} "
-          f"image_height:={cal_size[1]}.")
+    print("          scales EVERY pose silently. Re-run `arena scan` (or")
+    print(f"          ./calibrate_arena.sh) at the capture size, or set width/height in")
+    print(f"          config/camera.yaml back to {cal_size[0]}x{cal_size[1]}.")
     sys.exit(1)
 res = float(cal.get("max_residual_m") or 0)
 if res > 0.02:
@@ -139,17 +137,16 @@ ci = pathlib.Path("config/camera_info.yaml")
 if not ci.exists():
     print("  [WARN]  no config/camera_info.yaml"); sys.exit(2)
 d = yaml.safe_load(ci.read_text(encoding="utf-8"))
-launch = pathlib.Path("ros2_ws/src/hive_perception/launch/perception.launch.py").read_text(encoding="utf-8")
-def arg(name, default):
-    m = re.search(rf'DeclareLaunchArgument\("{name}",\s*default_value="(\d+)"', launch)
-    return int(m.group(1)) if m else default
-live = (arg("image_width", 640), arg("image_height", 480))
+sys.path.insert(0, "ros2_ws/src/hive_perception")
+from hive_perception.core.camera_config import load_camera_config
+cam = load_camera_config("config/camera.yaml")
+live = (cam.width, cam.height)
 declared = (int(d.get("image_width", 0)), int(d.get("image_height", 0)))
 k = d.get("camera_matrix", {}).get("data", [])
 placeholder = bool(k) and float(k[0]) == 1000.0 and float(k[4]) == 1000.0
 if declared != live:
     lvl = "WARN" if placeholder else "FAIL"
-    print(f"  [{lvl}]  camera_info says {declared} but capture default is {live}.")
+    print(f"  [{lvl}]  camera_info says {declared} but config/camera.yaml captures {live}.")
     print("          Intrinsics are in pixels and do not carry across resolutions.")
     if placeholder:
         print("          Harmless for now ONLY because these are placeholder values")

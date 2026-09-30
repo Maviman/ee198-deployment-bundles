@@ -56,6 +56,11 @@ class MarkerMap:
     calibration_corner_ids: list[int]
     max_correction_bits: int | None = None
     extra_print_ids: list[int] | None = None
+    # Printed black-square side lengths. The localizer turns these into the
+    # expected on-screen tag size, which tunes the detector and gates out
+    # detections that are the wrong size to be one of our tags.
+    vehicle_tag_m: float = 0.07
+    corner_tag_m: float = 0.10
 
     @property
     def print_ids(self) -> list[int]:
@@ -120,6 +125,8 @@ def load_marker_map(path) -> MarkerMap:
         calibration_corner_ids=[int(i) for i in data.get("calibration_corner_ids", [])],
         max_correction_bits=None if raw_correction is None else int(raw_correction),
         extra_print_ids=[int(i) for i in data.get("extra_print_ids", [])] or None,
+        vehicle_tag_m=float(data.get("vehicle_tag_m", 0.07)),
+        corner_tag_m=float(data.get("corner_tag_m", 0.10)),
     )
 
 
@@ -156,9 +163,13 @@ class FrameBuilder:
                 out.append(vid)
         return out
 
-    def build_frame(self, now_t: float) -> str | None:
+    def build_frame(self, now_t: float, extra: Mapping[str, object] | None = None) -> str | None:
         """One UDP-ready JSON frame, or None if any tracked vehicle is stale
-        (in which case the caller must send NOTHING — see module docstring)."""
+        (in which case the caller must send NOTHING — see module docstring).
+
+        ``extra`` adds optional keys after the contract fields (the fast path
+        sends ``seq`` and ``lat``, see portable_n1_controller's pose_stream).
+        It can never override ``t``/``pursuers``/``evader``."""
         poses: list[TimedPose] = []
         for vid in self.tracked_ids:
             last = self._last.get(vid)
@@ -171,4 +182,7 @@ class FrameBuilder:
             "pursuers": [{"x": p.x, "y": p.y, "heading": p.heading} for p in poses[:-1]],
             "evader": {"x": poses[-1].x, "y": poses[-1].y, "heading": poses[-1].heading},
         }
+        if extra:
+            for key, value in extra.items():
+                payload.setdefault(key, value)
         return json.dumps(payload)

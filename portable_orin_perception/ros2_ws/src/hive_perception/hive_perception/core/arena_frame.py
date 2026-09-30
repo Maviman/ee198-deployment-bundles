@@ -61,7 +61,11 @@ def pose_from_marker(H, center_px, top_midpoint_px) -> tuple[float, float, float
 
 
 def save_homography_yaml(path, H, residuals_m, *, arena_config: str = "",
-                         image_size=None, notes: str = "") -> None:
+                         image_size=None, notes: str = "", corner_px=None,
+                         extra: dict | None = None) -> None:
+    """``corner_px`` ({tag id: [x, y]}) records where each calibration corner
+    sat in the image, so the vision service can tell when the camera has been
+    bumped since (localizer.corner_drift_px)."""
     payload = {
         "homography": np.asarray(H, dtype=float).reshape(3, 3).tolist(),
         "max_residual_m": float(np.max(residuals_m)),
@@ -71,7 +75,21 @@ def save_homography_yaml(path, H, residuals_m, *, arena_config: str = "",
         "image_size": list(image_size) if image_size is not None else None,
         "notes": notes,
     }
+    if corner_px:
+        payload["corner_px"] = {int(k): [round(float(v[0]), 2), round(float(v[1]), 2)]
+                                for k, v in corner_px.items()}
+    if extra:
+        payload.update(extra)
     Path(path).write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+
+
+def load_calibration_yaml(path) -> dict:
+    """The whole calibration record: ``homography`` as a 3x3 array plus
+    ``image_size`` / ``corner_px`` / residuals when present."""
+    payload = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    payload["homography"] = load_homography_yaml(path)
+    payload["corner_px"] = {int(k): v for k, v in (payload.get("corner_px") or {}).items()}
+    return payload
 
 
 def load_homography_yaml(path) -> np.ndarray:

@@ -1,5 +1,11 @@
 # Orin all-in-one deployment (perception + controller on the Jetson)
 
+> **Day to day, use [ARENA.md](ARENA.md).** The `./arena` CLI does everything
+> below in one command per step (`arena init --single <user>@<orin>` for this
+> one-Jetson setup), runs the low-latency vision path instead of the ROS
+> pipeline, and adds the dashboard. This file stays as the by-hand reference
+> for what those commands do.
+
 The two bundles were built to talk over UDP between machines, but nothing
 requires two machines. This runbook brings up BOTH on one Jetson Orin for the
 immediate N=1 pursuer vs N=1 evader test:
@@ -104,23 +110,19 @@ Remember: any camera move invalidates the homography — recalibrate.
 
 ## Phase 4 — live all-on-Orin session (the demo runbook)
 
-One command, one terminal — brings up perception with the debug camera
-window (`rqt_image_view` on `/hive/debug_image`) and immediately starts the
-AI driving the pursuer over WiFi to the ESP32:
+The one-command version is the `arena` CLI ([ARENA.md](ARENA.md)):
 
 ```bash
-./start_demo.sh <esp-ip>                                # model defaults to n1_catch
-./start_demo.sh <esp-ip> portable_n1_controller/models/n1_pin
+./arena init --single <user>@<this-orin>     # once
+./arena scan && ./arena up                   # cars start DISARMED; dashboard on :8080
+./arena go                                   # arm; `./arena halt` / `./arena stop`
 ```
 
-Ctrl-C stops both perception and the controller. Requires the one-time setup
-in Phases 0.5–3 (SSH key, `setup_orin.sh`, and arena calibration) to already
-be done — `start_demo.sh` checks for the calibration file and the controller
-venv and exits with a clear error if either is missing.
+(The `start_demo.sh` this section used to describe was never written; `arena`
+replaces it.)
 
-Under the hood this is just two things running together, and you can still
-run them by hand in two terminals if you want separate output or to skip the
-debug window (e.g. to save CPU once everything's confirmed working):
+By hand, the ROS pipeline and the controller are two things running together
+in two terminals:
 
 ```bash
 # Terminal A — perception, pointed at this same machine

@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# The arena operator CLI. `./arena --help` lists every command; see ARENA.md.
+# Resolve this checkout's directory natively: `pwd -W` gives G:/... under Git Bash
+# (Windows python cannot open /g/...), and fails harmlessly on Linux.
+d="$(cd "$(dirname "$0")" && { pwd -W 2>/dev/null || pwd; })"
+# Stop Git Bash rewriting Orin-side paths such as ~/ee198-deployment-bundles.
+export MSYS_NO_PATHCONV=1
+exec "$(command -v python3 || command -v python)" "$d/deploy/arena.py" "$@"

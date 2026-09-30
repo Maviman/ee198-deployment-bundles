@@ -18,9 +18,10 @@ Launch arguments (ros2 launch hive_perception perception.launch.py --show-args):
     camera_backend     usb_cam (CPU MJPEG decode, default) | gst (hardware
                         NVJPG decode via GStreamer nvjpegdec). Measure both
                         with tools/probe_orin_gpu.py before switching.
-    image_width        capture width (default 640) — MUST match the width the
-    image_height       capture height (default 480)   arena calibration used
-    framerate          capture fps (default 15)
+    image_width        capture width  } defaults come from config/camera.yaml,
+    image_height       capture height } the single source of truth shared with
+    framerate          capture fps    } the fast path and `arena scan`
+    video_device                      }
 """
 
 import os
@@ -34,13 +35,30 @@ from launch_ros.actions import Node
 BUNDLE_ROOT = os.environ.get("HIVE_PERCEPTION_ROOT", os.getcwd())
 
 
+def _camera_defaults():
+    """config/camera.yaml (+ camera.local.yaml): the one capture-mode file every
+    consumer reads, so the ROS path, the fast path and the calibration cannot
+    disagree about resolution."""
+    # No silent fallback: a guessed resolution against a real calibration is a
+    # wrong pose on every frame. Fail the launch with the reason instead.
+    try:
+        from hive_perception.core.camera_config import load_camera_config
+        return load_camera_config(os.path.join(BUNDLE_ROOT, "config", "camera.yaml"))
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(
+            f"cannot read {os.path.join(BUNDLE_ROOT, 'config', 'camera.yaml')}: {exc}. Fix the "
+            "file, or rebuild the workspace (colcon build --symlink-install) if "
+            "hive_perception.core.camera_config is missing") from exc
+
+
 def generate_launch_description() -> LaunchDescription:
     config = os.path.join(BUNDLE_ROOT, "config")
+    cam = _camera_defaults()
     return LaunchDescription([
         DeclareLaunchArgument("controller_ip", default_value="127.0.0.1"),
         DeclareLaunchArgument("controller_port", default_value="9870"),
         DeclareLaunchArgument("expected_pursuers", default_value="1"),
-        DeclareLaunchArgument("video_device", default_value="/dev/video0"),
+        DeclareLaunchArgument("video_device", default_value=str(cam.device)),
         DeclareLaunchArgument("send_rate_hz", default_value="10.0"),
         # Safety dead-man cutoff (default matches the documented 0.25s hard
         # constraint — do not raise this for anything but a wheels-off,
@@ -56,11 +74,13 @@ def generate_launch_description() -> LaunchDescription:
         # 15 fps the 720p budget is ~63% of a core, and pinning clocks
         # (`sudo jetson_clocks`, board profiled at 1.19 of 1.73 GHz) takes it
         # to ~43%. Re-measure before assuming 720p is out of reach.
-        # Must match calibrate_arena.sh's --width/--height (and re-run
-        # calibration) if you change this.
-        DeclareLaunchArgument("image_width", default_value="640"),
-        DeclareLaunchArgument("image_height", default_value="480"),
-        DeclareLaunchArgument("framerate", default_value="15"),
+        # Defaults come from config/camera.yaml. The arena calibration records
+        # the resolution it was made at; change it there, then `arena scan`.
+        # This ROS path moves every image through DDS, so at 720p it may want
+        # framerate:=15 (the fast path, run_vision.py, has no such hop).
+        DeclareLaunchArgument("image_width", default_value=str(cam.width)),
+        DeclareLaunchArgument("image_height", default_value=str(cam.height)),
+        DeclareLaunchArgument("framerate", default_value=str(cam.fps)),
 
         # Camera A: usb_cam, CPU MJPEG decode (mjpeg2rgb). The known-good path.
         Node(
@@ -109,6 +129,7 @@ def generate_launch_description() -> LaunchDescription:
             parameters=[{
                 "marker_map_path": os.path.join(config, "marker_map.yaml"),
                 "homography_path": os.path.join(config, "arena_homography.yaml"),
+                "arena_config_path": os.path.join(config, "arena_test_6ft.yaml"),
                 "debug": LaunchConfiguration("debug"),
             }],
             remappings=[

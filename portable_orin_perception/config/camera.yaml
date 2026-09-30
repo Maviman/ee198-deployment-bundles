@@ -1,0 +1,30 @@
+# Capture mode -- the ONE source of truth (see core/camera_config.py for every
+# consumer). Changing width/height invalidates the arena calibration: run
+# `arena scan` afterwards, and the pipeline refuses to start until you do.
+#
+# Why 1280x720 @ 30:
+#   - A square arena fits the image's SHORT side, so 7 cm vehicle tags are only
+#     ~17-18 px at 640x480: below the detection floor (dropped frames -> dead-man
+#     stops). At 720p they are ~25 px. `arena scan` prints the measured size.
+#   - 30 fps is a multiple of the 10 Hz control tick, so every tick runs on a
+#     frame that just arrived instead of one up to a frame interval old.
+#   - The fast path (run_vision.py) decodes luma only and tracks tags in small
+#     windows, which is what makes 720p30 fit on one Orin core.
+# If your camera cannot do 1280x720 MJPEG at 30 fps (`arena scan` lists what it
+# offers), use 640x480 / 30 and re-scan.
+# A /dev/v4l/by-id/usb-...-video-index0 path (ls /dev/v4l/by-id/) survives the
+# camera re-enumerating as /dev/video1 after a USB glitch; /dev/video0 may not.
+device: /dev/video0
+width: 1280
+height: 720
+fps: 30
+
+# Exposure in 100 us units (80 = 8 ms), or auto. Short manual exposure freezes a
+# moving car; `arena scan --tune-exposure` picks the shortest one that is bright
+# enough for the room and saves it to camera.local.yaml.
+exposure: auto
+dynamic_framerate: false   # never let the camera halve its fps in dim light
+autofocus: false           # focus hunting = blur + drifting intrinsics
+focus: null                # absolute focus value; null = leave as is
+power_line_hz: 60          # anti-flicker for room lights (50 in EU mains)
+gain: null

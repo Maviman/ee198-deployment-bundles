@@ -11,6 +11,9 @@
   4. Wire-format round-trip: FrameBuilder JSON parsed by the CONTROLLER'S OWN
      parser (byte-identical vendored copy of portable_n1_controller's
      pose_stream.py) — proves this bundle speaks the controller's language.
+  5. Fast path (run_vision.py): the shared Localizer finds two moving tags in
+     rendered 720p frames with identities intact, hands over to its tracking
+     windows, and the JPEG luma-only decode works on this OpenCV build.
 
 Run:  python3 selftest.py     (works before setup_orin.sh — only needs
                                numpy + opencv + pyyaml, see requirements.txt)
@@ -169,16 +172,55 @@ def check_controller_roundtrip() -> list[str]:
     return failures
 
 
+def check_fast_path() -> list[str]:
+    import cv2
+
+    sys.path.insert(0, str(ROOT))
+    import vision  # noqa: F401
+    from hive_perception.core.localizer import Localizer
+    from vision.synthetic import SceneRenderer, overhead_homography
+
+    failures = []
+    mm = load_marker_map(ROOT / "config" / "marker_map.yaml")
+    size, half = (1280, 720), (0.915, 0.915)
+    H = overhead_homography(size, half, fill=0.9)
+    renderer = SceneRenderer(mm, H, size, half)
+    loc = Localizer(mm, H, image_size=size, arena_half_extent=half)
+    vehicles = list(mm.pursuer_ids) + [mm.evader_id]
+    modes = []
+    for k in range(4):
+        truth = {vid: (-0.5 + 0.3 * i + 0.01 * k, 0.2 * i - 0.3, 0.4 * i) for i, vid in enumerate(vehicles)}
+        jpg = SceneRenderer.to_jpeg(renderer.render(truth))
+        gray = cv2.imdecode(np.frombuffer(jpg, np.uint8), cv2.IMREAD_GRAYSCALE)
+        if gray is None or gray.shape != (size[1], size[0]):
+            return ["cv2.imdecode(IMREAD_GRAYSCALE) failed on a 720p JPEG"]
+        res = loc.process(gray, k / 30.0)
+        modes.append(res.mode)
+        for vid, (x, y, _h) in truth.items():
+            got = res.found.get(vid)
+            if got is None:
+                failures.append(f"frame {k}: tag {vid} not localized")
+            elif abs(got[0] - x) > 0.01 or abs(got[1] - y) > 0.01:
+                failures.append(f"frame {k}: tag {vid} at {got[:2]}, expected ({x:.2f}, {y:.2f}) "
+                                "-- identity swap or geometry error")
+    if "roi" not in modes[1:]:
+        failures.append(f"tracking windows never engaged (modes {modes})")
+    print(f"  {len(vehicles)} moving tags localized through decode -> localizer ({' '.join(modes)})")
+    return failures
+
+
 def main() -> None:
     failures: list[str] = []
-    print("[1/4] fiducial render -> subset detect -> localize")
+    print("[1/5] fiducial render -> subset detect -> localize")
     failures += check_fiducial_detection()
-    print("[2/4] homography + heading conventions")
+    print("[2/5] homography + heading conventions")
     failures += check_homography_math()
-    print("[3/4] frame-builder dead-man policy")
+    print("[3/5] frame-builder dead-man policy")
     failures += check_frame_builder_policy()
-    print("[4/4] controller wire-format round-trip")
+    print("[4/5] controller wire-format round-trip")
     failures += check_controller_roundtrip()
+    print("[5/5] fast path: jpeg luma decode -> localizer -> tracking windows")
+    failures += check_fast_path()
 
     if failures:
         print("\nSELFTEST FAILED:")

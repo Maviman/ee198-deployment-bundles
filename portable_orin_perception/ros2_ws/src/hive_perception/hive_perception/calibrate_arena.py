@@ -113,16 +113,22 @@ def main(argv=None) -> None:
     src.add_argument("--device", help="camera device (index like 0, or /dev/video0)")
     src.add_argument("--image", help="calibrate from a saved image instead of a live camera")
     parser.add_argument("--frames", type=int, default=10, help="frames to average over (live mode)")
-    parser.add_argument("--width", type=int, default=640,
-                        help="capture width — MUST match perception.launch.py's image_width")
-    parser.add_argument("--height", type=int, default=480,
-                        help="capture height — MUST match perception.launch.py's image_height")
+    parser.add_argument("--width", type=int, default=None,
+                        help="capture width (default: config/camera.yaml, shared with every consumer)")
+    parser.add_argument("--height", type=int, default=None,
+                        help="capture height (default: config/camera.yaml)")
+    parser.add_argument("--camera-config", default="config/camera.yaml")
     parser.add_argument("--arena-config", default="config/arena_test_6ft.yaml")
     parser.add_argument("--marker-map", default="config/marker_map.yaml")
     parser.add_argument("--camera-info", default="config/camera_info.yaml")
     parser.add_argument("--out", default="config/arena_homography.yaml")
     parser.add_argument("--residual-warn-m", type=float, default=0.02)
     args = parser.parse_args(argv)
+    if args.width is None or args.height is None:
+        from .core.camera_config import load_camera_config
+        cam = load_camera_config(args.camera_config)
+        args.width = args.width or cam.width
+        args.height = args.height or cam.height
 
     import cv2
 

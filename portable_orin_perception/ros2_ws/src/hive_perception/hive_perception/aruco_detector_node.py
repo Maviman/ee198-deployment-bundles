@@ -14,8 +14,14 @@ pose_bridge_node and documented in the bundle README:
     poses[0..N-1] = pursuers in marker_map.yaml order, poses[N] = evader
 
 A vehicle whose marker was NOT detected this frame gets a NaN pose in its slot
-(the PoseArray is raw per-frame truth, useful in rviz2/rosbag; the hold/
+(the PoseArray is per-frame truth, useful in rviz2/rosbag; the hold/
 staleness policy lives downstream in pose_bridge_node, not here).
+
+Detection itself is core.localizer.Localizer, the same engine the fast path
+(run_vision.py) runs: tuned to the known tag size, tracking windows, and
+plausibility gates. A pose the gates reject (outside the arena, an
+impossible jump, wrong tag size, duplicate id) is published as NaN, exactly
+like a missed detection. Set roi_tracking/gating false to A/B them.
 """
 
 from __future__ import annotations
@@ -30,8 +36,11 @@ from geometry_msgs.msg import Pose, PoseArray
 from rclpy.node import Node
 from sensor_msgs.msg import CameraInfo, Image
 
+import yaml
+
 from .core import arena_frame, marker_math
 from .core.frame_builder import load_marker_map
+from .core.localizer import Localizer
 
 
 class ArucoDetectorNode(Node):
@@ -42,19 +51,25 @@ class ArucoDetectorNode(Node):
         self.declare_parameter("poses_topic", "/hive/vehicle_poses")
         self.declare_parameter("debug", False)
         self.declare_parameter("debug_topic", "/hive/debug_image")
+        self.declare_parameter("arena_config_path", "config/arena_test_6ft.yaml")
+        self.declare_parameter("roi_tracking", True)
+        self.declare_parameter("gating", True)
 
         marker_map_path = self.get_parameter("marker_map_path").value
         homography_path = self.get_parameter("homography_path").value
         self.marker_map = load_marker_map(marker_map_path)
-        self.homography = arena_frame.load_homography_yaml(homography_path)
+        calibration = arena_frame.load_calibration_yaml(homography_path)
+        self.homography = calibration["homography"]
+        self.calibrated_size = tuple(calibration["image_size"]) if calibration.get("image_size") else None
         self.slots = self.marker_map.pursuer_ids + [self.marker_map.evader_id]
 
         # Subset dictionary: only the ids this arena prints. detectMarkers()
         # then reports ROW INDICES into tag_set.real_ids, never the printed id
-        # — every detection must go through tag_set.to_real_id().
+        # — the Localizer translates every detection with tag_set.to_real_id().
         self.tag_set = self.marker_map.tag_set()
-        self.detector = cv2.aruco.ArucoDetector(
-            self.tag_set.build_opencv_dictionary(), cv2.aruco.DetectorParameters())
+        arena = yaml.safe_load(open(self.get_parameter("arena_config_path").value, encoding="utf-8"))
+        self.arena_half = (float(arena["arena_width_m"]) / 2.0, float(arena["arena_height_m"]) / 2.0)
+        self.localizer = None      # built on the first frame, when the image size is known
         self.bridge = CvBridge()
         self.camera_matrix: np.ndarray | None = None
         self.dist_coeffs: np.ndarray | None = None
@@ -115,40 +130,38 @@ class ArucoDetectorNode(Node):
     def on_camera_info(self, msg: CameraInfo) -> None:
         self.camera_matrix = np.asarray(msg.k, dtype=np.float64).reshape(3, 3)
         self.dist_coeffs = np.asarray(msg.d, dtype=np.float64)
-
-    def _decode(self, corners, ids) -> list[tuple[int, np.ndarray]]:
-        """(printed_id, corners) pairs. Translates the subset dictionary's row
-        indices into real tag ids; an out-of-range row means the dictionary and
-        the marker map disagree, which is a configuration bug worth shouting
-        about rather than silently dropping."""
-        if ids is None:
-            return []
-        out = []
-        for marker_corners, row in zip(corners, ids.flatten()):
-            try:
-                out.append((self.tag_set.to_real_id(int(row)), marker_corners))
-            except IndexError as exc:
-                self.get_logger().error(str(exc), throttle_duration_sec=5.0)
-        return out
+        if self.localizer is not None:
+            self.localizer.camera_matrix = self.camera_matrix
+            self.localizer.dist_coeffs = self.dist_coeffs
 
     def on_image(self, msg: Image) -> None:
         bgr = self.bridge.imgmsg_to_cv2(msg, "bgr8")
         gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-        corners, ids, _rejected = self.detector.detectMarkers(gray)
-        detections = self._decode(corners, ids)
-
-        found: dict[int, tuple[float, float, float]] = {}
-        for marker_id, marker_corners in detections:
-            if marker_id not in self.slots:
-                continue
-            ref_px = np.vstack([
-                marker_math.marker_center_px(marker_corners),
-                marker_math.marker_top_midpoint_px(marker_corners),
-            ])
-            ref_px = marker_math.undistort_points(
-                ref_px, self.camera_matrix, self.dist_coeffs)
-            found[marker_id] = arena_frame.pose_from_marker(
-                self.homography, ref_px[0], ref_px[1])
+        size = (gray.shape[1], gray.shape[0])
+        if self.calibrated_size and size != self.calibrated_size:
+            # A homography is pixel geometry: at another resolution every pose is
+            # wrong, often still inside the arena and so not caught by the gates.
+            # Publish nothing; the bridge goes quiet and the controller E-stops.
+            self.get_logger().error(
+                f"frames are {size[0]}x{size[1]} but the arena was calibrated at "
+                f"{self.calibrated_size[0]}x{self.calibrated_size[1]}: publishing NO poses. "
+                "Run `arena scan` (or calibrate_arena.sh) at this size, or launch with "
+                f"image_width:={self.calibrated_size[0]} image_height:={self.calibrated_size[1]}",
+                throttle_duration_sec=5.0)
+            return
+        if self.localizer is None:
+            self.localizer = Localizer(
+                self.marker_map, self.homography, image_size=(gray.shape[1], gray.shape[0]),
+                camera_matrix=self.camera_matrix, dist_coeffs=self.dist_coeffs,
+                arena_half_extent=self.arena_half,
+                roi_tracking=bool(self.get_parameter("roi_tracking").value),
+                gating=bool(self.get_parameter("gating").value))
+        t = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        res = self.localizer.process(gray, t)
+        detections = [(d.marker_id, d.corners) for d in res.detections]
+        found = res.found
+        for vid, reason in res.rejected:
+            self.get_logger().warning(f"rejected tag {vid}: {reason}", throttle_duration_sec=2.0)
 
         out = PoseArray()
         out.header.stamp = msg.header.stamp

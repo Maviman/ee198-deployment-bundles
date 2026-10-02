@@ -891,7 +891,8 @@ def cmd_sim(args, cfg: Config) -> None:
     log_dir.mkdir(parents=True, exist_ok=True)
     specs = [
         ("world", REPO / "portable_n1_controller",
-         [py, "-u", "tools/sim_world.py", "--cars", str(n), "--base-port", str(base), "--world-port", "19880"]),
+         [py, "-u", "tools/sim_world.py", "--cars", str(n), "--base-port", str(base), "--world-port", "19880",
+          "--buttons", args.buttons]),
         ("hub", REPO, [py, "-u", "deploy/hub.py", "--port", str(args.port), "--telemetry-port", "19871",
                        "--control-port", "19872", "--preview", "http://127.0.0.1:18090"]),
         ("controller", REPO / "portable_n1_controller",
@@ -907,7 +908,8 @@ def cmd_sim(args, cfg: Config) -> None:
             fh = open(log_dir / f"{name}.log", "w", encoding="utf-8")
             procs.append((name, subprocess.Popen(cmd, cwd=cwd, stdout=fh, stderr=subprocess.STDOUT), fh))
         url = f"http://127.0.0.1:{args.port}"
-        print(f"simulated arena up ({n} car(s), model {args.model}); logs in {log_dir}")
+        print(f"simulated arena up ({n} car(s), model {args.model}, "
+              f"actuation {'proportional' if args.buttons == 'off' else 'buttons ' + args.buttons}); logs in {log_dir}")
         print(f"  dashboard  {url}")
         if not args.no_browser:
             import webbrowser
@@ -1023,6 +1025,9 @@ def main(argv=None) -> None:
     p.add_argument("--disarmed", action="store_true", help="do not arm automatically")
     p.add_argument("--no-browser", action="store_true")
     p.add_argument("--monitor", action="store_true", help="also show the terminal monitor here")
+    p.add_argument("--buttons", choices=["off", "mod", "binary"], default="off",
+                   help="sim cars driven through 4 on/off remote buttons like the real V3 cars "
+                        "(mod = time-modulated presses, binary = on/off at 1/3)")
     p.set_defaults(fn=cmd_sim)
 
     args = ap.parse_args(argv)

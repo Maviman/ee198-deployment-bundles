@@ -260,6 +260,8 @@ def ai_guide() -> Guide:
                          Term("AI ORIN", "Terminal 1 · ARENA", [
                              ("arena sim", "the whole stack with a simulated arena + cars; "
                                            "dashboard at http://localhost:8080; Ctrl-C to stop"),
+                             ("arena sim --buttons mod", "the same, with the sim cars driven through "
+                                                         "on/off remote buttons like the real cars"),
                          ]),
                      ]),
                      Section("Manual mode (if `arena up` cannot reach the vision Orin)",

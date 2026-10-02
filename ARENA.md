@@ -21,7 +21,7 @@ terminal.
                                   │
                                   │ UDP :8888 commands (DSCP EF = WiFi voice queue)
                                   ▼
-                     ESP32 on each car ── L298N (drive) + servo (steer)
+                     ESP32 on each car ── presses the car's RC remote (FWD/BACK/LEFT/RIGHT)
 ```
 
 ## Why the work is split this way
@@ -221,7 +221,8 @@ Every hop fails to *stopped*:
 ## Rehearsal with no hardware
 
 ```bash
-./arena sim            # opens the dashboard; Ctrl-C to stop
+./arena sim                    # opens the dashboard; Ctrl-C to stop
+./arena sim --buttons mod      # sim cars driven through on/off remote buttons, like the real V3 cars
 ```
 
 Runs everything on this machine through the production code paths. A

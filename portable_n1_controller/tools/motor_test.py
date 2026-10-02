@@ -1,8 +1,8 @@
 """Direct actuator test: bypasses perception AND the policy entirely, sends a
 fixed step sequence of throttle/steer commands straight to the ESP. For
-answering one question in isolation: do the drive motor (L298N H-bridge) and
-the steering servo actually respond to commands at all, independent of whether
-the perception/policy pipeline is healthy right now.
+answering one question in isolation: does the car respond to commands at all
+(the V3 firmware presses its RC remote's FWD/BACK/LEFT/RIGHT buttons),
+independent of whether the perception/policy pipeline is healthy right now.
 
 Unlike tools/link_test.py (deliberately zero-throttle, comms-only), this DOES
 command the drive motor. Sends steadily at 10 Hz throughout (matching the
@@ -15,15 +15,14 @@ one thing this tool exists to isolate.
 
 What to watch for, since neither sign convention is knowable from software:
 
-- "forward" really drives forward. If it's backwards, swap the driveMotor()
-  IN-pin arguments in the sketch (or the wires at L298N OUT3/OUT4).
-- "steer left" really goes left. If it's mirrored, swap STEER_MIN_US and
-  STEER_MAX_US in the sketch.
-- Every "neutral" step returns the wheels to actually straight. If they sit
-  off-center, that's STEER_CENTER_US trim, not a wiring fault.
-- The servo does not buzz or strain at either extreme -- that means the
-  commanded throw is driving the linkage into its mechanical stop, and the
-  stalled servo can brown out the ESP32. Narrow STEER_MIN_US/STEER_MAX_US.
+- "forward" really drives forward and "steer left" really goes left. If a
+  button is wrong, fix the order on the car's serial console with
+  `pins <fwd> <back> <left> <right>` (its `test` command shows which is which).
+- In the firmware's modulated mode, a small throttle should give a slower
+  wheel than a big one. If every throttle looks the same (or nothing moves at
+  small values), the remote is missing the short presses: raise `slot`.
+- In binary mode, a command below 1/3 presses nothing: use --throttle 0.5.
+- Every "neutral" step releases every button.
 
 SAFETY: wheels OFF the ground for this. Default throttle magnitude is a
 gentle 0.3 (normalized) -- raise with --throttle only once 0.3 is confirmed

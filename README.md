@@ -15,16 +15,16 @@ This repo is what actually runs on the hardware — no training repo, no PyTorch
                                         │ throttle / steer, UDP :8888 (WiFi)
                                         ▼
                                  ESP32 on each car
-                                        │
-                           ┌────────────┴────────────┐
-                           ▼                         ▼
-                   L298N H-bridge            steering servo
-                 7.4 V drive motor
+                                        │ 4 transistors
+                                        ▼
+                       the car's RC remote: FWD / BACK / LEFT / RIGHT
+                       (on/off buttons, pressed modulated or binary)
 ```
 
-A camera finds each car, the policy decides where to go, the ESP32 drives the
-motors. Every hop has a failsafe: if poses stop arriving, or commands stop
-arriving, the car stops on its own. One Orin can also run both halves.
+A camera finds each car, the policy decides where to go, and the ESP32 on each
+car presses its RC remote's buttons. Every hop has a failsafe: if poses stop
+arriving, or commands stop arriving, every button is released and the car
+stops. One Orin can also run both halves.
 
 ## The two bundles
 

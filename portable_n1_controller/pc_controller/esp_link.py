@@ -10,8 +10,8 @@ Packet format (one JSON object per UDP datagram, newline-terminated):
 - estop: when true the ESP must go to neutral immediately regardless of cmd.
 - cmd: one [throttle, steer] pair per pursuer, each normalized to [-1, 1]
   (SinglePursuerEnv's action layout: +throttle forward, +steer left).
-  The ESP maps throttle to L298N H-bridge PWM and steer to a steering-servo
-  pulse width.
+  The ESP turns each into presses of the car's RC-remote buttons (FWD/BACK,
+  LEFT/RIGHT), modulated or on/off; see esp32/esp32_receiver/button_mod.h.
 
 Multi-vehicle addressing
 ------------------------

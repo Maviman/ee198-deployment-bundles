@@ -21,7 +21,7 @@ python selftest.py                  # must print SELFTEST PASSED before anything
 | `run_controller.py` | Main entry point (see below). |
 | `selftest.py` + `reference_vectors.json` | Golden-vector health check: proves the vendored contract + models on this machine reproduce the outputs frozen at bundle creation. |
 | `tools/mock_esp.py` | Fake ESP32 for testing the full PC side with zero hardware. |
-| `esp32/esp32_receiver/` | Arduino sketch for the real ESP32 (WiFi UDP → L298N drive-motor PWM + steering-servo PWM, with failsafe). |
+| `esp32/esp32_receiver/` | Firmware for the ESP32 on each car (WiFi UDP → presses the FWD/BACK/LEFT/RIGHT buttons of the car's RC remote, with failsafe). `button_mod.h` turns a command into presses; `esp32/test_host/` tests it on a PC. |
 
 ## Which model?
 
@@ -47,23 +47,37 @@ The simulator plays the world; the controller sees only poses (like a camera
 would), runs the policy, and transmits real packets. You should see captures in
 the controller terminal and ~10 pkt/s with sane throttle/steer in the mock ESP.
 
-**2. Real ESP32, wheels off the ground.** Edit WiFi credentials + pins in
-`esp32/esp32_receiver/esp32_receiver.ino`, flash it, read its IP off the serial
+**2. Real ESP32, wheels off the ground.** Put the WiFi credentials in
+`esp32/esp32_receiver/wifi_credentials.h`, flash, read the IP off the serial
 monitor, then re-run step 1 with `--esp <esp-ip>:8888`. The sim episode now
-physically twitches the real steering servo and drive motor. Unplug the network
-mid-run to watch the 300 ms failsafe drop it to neutral.
+presses the real remote's buttons. Unplug the network mid-run to watch the
+300 ms failsafe release every button.
 
-The car's two channels run on different hardware — the sketch's own HARDWARE
-MAPPING comment is the authority on wiring, but in summary:
+**The V3 car (2026-10-02): the ESP32 presses the buttons of the car's own RC
+remote.** Four GPIOs drive four NPN transistors (base resistor each; a 100 k
+base-to-emitter pull-down is recommended) wired across the remote's FWD,
+BACK, LEFT and RIGHT buttons; GPIO HIGH = pressed, and the ESP32 and remote
+grounds are common. The sketch header is the authority; in summary:
 
-| Channel | Hardware | ESP32 pins |
+| Button | Default GPIO | Notes |
 |---|---|---|
-| throttle | 7.4 V brushed DC motor via L298N H-bridge (OUT3/OUT4) | IN3 = GPIO 6, IN4 = GPIO 7 |
-| steer | 3-wire positional hobby servo, signalled and powered off the ESP32 | signal = GPIO 5 |
+| FWD / BACK | 1 / 2 | throttle; opposite buttons are never pressed together |
+| LEFT / RIGHT | 42 / 41 | steer; a direction change always passes through a released slot |
 
-ESP32 and L298N grounds must be common. Neither sign convention
-(forward/reverse, left/right) is knowable from software — watch the first
-motion and invert as the sketch describes if either comes out backwards.
+The buttons are on/off, so the firmware turns `[throttle, steer]` into
+presses in one of two modes (serial `mode`, saved on the board):
+
+- **mod** (default): each button is held for a fraction of the time equal to
+  the command (sigma-delta over `slot` ms slots, default 40), like feathering a
+  button. This only works if the remote registers presses that short: tune
+  `slot` on the real remote, wheels off. `limit` caps throttle (default 0.6).
+- **binary**: pressed while |command| ≥ 1/3, released otherwise.
+
+Which wire is which button is only knowable by looking. Over serial: `test`
+presses FWD, BACK, LEFT, RIGHT in turn (wheels off); `pins <fwd> <back>
+<left> <right>` fixes the order without reflashing. The setter refuses pins
+that misbehave at boot or belong to the console, USB, flash or PSRAM.
+`arena sim --buttons mod|binary` previews button control in the simulator.
 
 **3. Real perception.** When the overhead-camera ArUco pipeline exists, have it
 send pose frames (format below) and run:
@@ -93,8 +107,8 @@ simulated arena plus mock fleet (what `arena sim` runs).
 ignores `seq` ≤ last applied, goes neutral on `estop` or a 300 ms stream stall.
 
 **Discovery / configuration** (current firmware): `{"probe": 1}` gets
-`{"car", "fw", "mac", "failsafe", "up_s", "last_seq", "rssi", "ota", "duty_max"}`
-back with no effect on the motors; `{"cfg": {"index": n}}` sets CAR_INDEX, but
+`{"car", "fw", "mac", "failsafe", "up_s", "last_seq", "rssi", "ota", "act", "mode", "slot_ms", "thr_limit"}`
+back with no effect on the buttons; `{"cfg": {"index": n}}` sets CAR_INDEX, but
 only while the car is stopped. OTA updates (`arena flash --ota`) need
 `OTA_PASSWORD` in `wifi_credentials.h` and are only serviced while stopped.
 
@@ -194,21 +208,20 @@ Meters/radians, arena-centered, heading 0 = +x CCW+, `t` = frame CAPTURE time
   both together. `selftest.py` exists to catch exactly this drift.
 - **Sim speeds assume the real car matches the config** (3.1 m/s top speed,
   1.6 m/s² accel, 28° steering). Before trusting closed-loop driving, do a
-  simple system-ID pass on the real car and compare. Cap the drive power in
-  the sketch for early runs regardless: `THROTTLE_MAX_DUTY` ships deliberately
-  gentle, and is the first thing to re-tune wheels-off after any change to the
-  motor, battery, or gearing.
+  simple system-ID pass on the real car and compare. Cap the drive power for
+  early runs regardless: the firmware's throttle `limit` ships at 0.6, and is
+  the first thing to re-tune wheels-off.
+- **Every policy here was trained on a proportional car.** The V3 car's
+  remote is on/off, so what the policy asks for is approximated by button
+  presses (modulated or binary). In `arena sim`, `n1_catch` caught about as
+  often with buttons as without (one 60 s run per mode), but the sim's chase
+  is easy and its steering instant. Measure on the real remote; a retrain on
+  the real car's actuation is the real fix.
 - **The policy uses reverse.** Observed in sim runs: `n1_catch` sometimes
-  drives backwards (throttle −1.0) all the way to a capture — the sim treats
-  reverse as symmetric with forward. The L298N H-bridge satisfies this
-  natively (no double-tap-to-reverse lockout the way a toy ESC has); what to
-  verify on the real car is that forward and reverse are actually *symmetric*
-  in speed, since the sim assumes they are.
-- **Steering is positional now.** The servo holds a commanded wheel angle, so
-  `steer` maps to an angle rather than a turn *rate*. Keep the servo throw
-  inside where the linkage physically binds (`STEER_MIN_US`/`STEER_MAX_US`) —
-  a servo stalled against its stop draws its full stall current off the
-  ESP32's 5V rail and can brown the board out mid-run.
+  drives backwards (throttle −1.0) all the way to a capture. The firmware
+  presses BACK directly; what to verify on the real car is that its remote
+  reverses on a plain press (some RC cars brake first, then reverse on a
+  second press) and that forward and reverse are roughly symmetric in speed.
 
 ## Provenance
 

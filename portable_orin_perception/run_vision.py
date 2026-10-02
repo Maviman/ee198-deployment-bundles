@@ -42,6 +42,9 @@ def main(argv=None) -> int:
     ap.add_argument("--device", default=None, help="override config/camera.yaml device")
     ap.add_argument("--camera-config", default=None)
     ap.add_argument("--marker-map", default=None)
+    ap.add_argument("--pursuers", type=int, default=None,
+                    help="track the first N pursuer tags of config/marker_map.yaml (CAR_INDEX 0..N-1); "
+                         "must match the model's num_pursuers. Default: all of them")
     ap.add_argument("--arena-config", default=None)
     ap.add_argument("--homography", default=None)
     ap.add_argument("--hold-max-age-s", type=float, default=0.25,

@@ -1,0 +1,226 @@
+{
+ "runtime": "hive_commander_v1",
+ "model": "c37_commit3_ft_g997_arena183",
+ "num_pursuers": 3,
+ "input_dim": 124,
+ "action_dim": 6,
+ "opset": 17,
+ "use_car_cameras": false,
+ "onnx": {
+  "input": {
+   "observations": [
+    1,
+    124
+   ]
+  },
+  "outputs": {
+   "role_logits": [
+    1,
+    3,
+    5
+   ],
+   "settings": [
+    1,
+    3,
+    2
+   ],
+   "residual": [
+    1,
+    3,
+    2
+   ]
+  },
+  "scaler_baked_in": true,
+  "settings_and_residual": "post-tanh"
+ },
+ "control_dt_s": 0.1,
+ "arena": {
+  "half_w": 0.915,
+  "half_h": 0.915,
+  "diag": 2.5880108191427635,
+  "edge": "wall"
+ },
+ "car": {
+  "model": "driftking",
+  "max_speed_mps": 0.61,
+  "max_steer_rad": 0.5235987755982988,
+  "contact_nose_nose_m": 0.13419999999999999,
+  "wheelbase_m": 0.078995,
+  "lat_accel_max_mps2_with_margin": 0.718092
+ },
+ "capture_radius_m": 0.183,
+ "residual_scale": 0.5,
+ "time_in_role_scale_s": 10.0,
+ "obs_clip": 3.0,
+ "playbook_evader_velocity": true,
+ "forecast": {
+  "t_short_s": 0.5,
+  "t_long_s": 1.0,
+  "walls_clamp": true,
+  "num_headings": 32
+ },
+ "roles": [
+  "CUTOFF",
+  "FLANK",
+  "PRESSURE",
+  "CLOSE"
+ ],
+ "role_actions": [
+  "KEEP",
+  "CUTOFF",
+  "FLANK",
+  "PRESSURE",
+  "CLOSE"
+ ],
+ "setting_ranges": {
+  "CUTOFF": [
+   [
+    -30.0,
+    30.0
+   ],
+   [
+    0.183,
+    0.61
+   ]
+  ],
+  "FLANK": [
+   [
+    -30.0,
+    30.0
+   ],
+   [
+    0.183,
+    0.61
+   ]
+  ],
+  "PRESSURE": [
+   [
+    -45.0,
+    45.0
+   ],
+   [
+    0.244,
+    0.7625
+   ]
+  ],
+  "CLOSE": [
+   [
+    -40.0,
+    40.0
+   ],
+   [
+    0.3,
+    1.0
+   ]
+  ]
+ },
+ "playbook": {
+  "max_steer": 0.5235987755982988,
+  "capture_radius": 0.183,
+  "max_speed_mps": 0.61,
+  "half_extent": [
+   0.915,
+   0.915
+  ],
+  "wall_inset_m": 0.0915,
+  "edge_margin_m": null,
+  "edge_unblock_throttle": 0.3,
+  "cramped_turn_deg": 60.0,
+  "cramped_room_m": null,
+  "walls_count": true,
+  "num_headings": 32,
+  "second_lane_min_deg": 60.0,
+  "cutoff_max_m": 0.915,
+  "cutoff_lead_s": 0.5,
+  "contact_nose_nose_m": 0.13419999999999999,
+  "wheelbase_m": 0.078995,
+  "lat_accel_max_mps2": 0.718092,
+  "binary_steer": false,
+  "contact_margin_m": 0.01525,
+  "mate_gap_m": 0.033549999999999996,
+  "close_margin_m": 0.0305,
+  "pressure_keepout_frac": 0.6,
+  "pressure_speed_cap": 0.7,
+  "approach_gain_per_m": 2.459016393442623,
+  "stop_tol_m": 0.01525,
+  "min_turn_throttle": 0.2,
+  "route_clear_m": 0.04575,
+  "route_arc_step_deg": 25.0,
+  "reverse_deg": 120.0,
+  "reverse_within_m": 0.305,
+  "reverse_max": 0.5,
+  "evader_decel_mps2": 0.61,
+  "ff_gain": 1.0,
+  "mate_cone_deg": 30.0,
+  "mate_decel_mps2": 0.61,
+  "unblock_reverse": 0.15
+ },
+ "initial_roles": "uniform random per car at every reset (training); reset(roles=...) pins them",
+ "obs_layout": {
+  "tokens": [
+   "pursuer 0",
+   "pursuer 1",
+   "pursuer 2",
+   "evader"
+  ],
+  "per_token": [
+   "x/half_w",
+   "y/half_h",
+   "sin yaw",
+   "cos yaw",
+   "v_signed/max_speed",
+   "dist to evader/diag",
+   "sin bearing to evader",
+   "cos bearing to evader",
+   "(x+hw)/2hw",
+   "(hw-x)/2hw",
+   "(y+hh)/2hh",
+   "(hh-y)/2hh",
+   "role one-hot CUTOFF",
+   "FLANK",
+   "PRESSURE",
+   "CLOSE",
+   "time in role/scale (0..3)",
+   "setting z1",
+   "setting z2",
+   "dist to role target/diag",
+   "sin bearing to target",
+   "cos bearing to target",
+   "playbook throttle",
+   "playbook steer",
+   "CTRV x(+0.5 s)/hw",
+   "y(+0.5 s)/hh",
+   "x(+1 s)/hw",
+   "y(+1 s)/hh",
+   "yaw rate/3",
+   "evader only: escape now/diag",
+   "evader only: escape at +1 s/diag"
+  ],
+  "evader_token_zeros": "dist/bearing to itself (3) and all 12 role features",
+  "final": "nan -> 0, then clipped to [-obs_clip, obs_clip]"
+ },
+ "command": "[throttle, steer] per car in [-1, 1], +steer = left; = clip(playbook + residual_scale x residual)",
+ "notes": [
+  "SCALED VARIANT: the c37_commit3_ft_g997 network in a 1.83 m arena, every length and speed x 0.3050. Speed scale 0.610 m/s: throttle 1.0 asks for that speed.",
+  "THROTTLE was a SPEED COMMAND in training: target speed = throttle x max_speed_mps, held by the sim car's speed loop (slew 3 m/s^2). A real ESC driven open loop is not that; expect a mismatch.",
+  "Velocities are inputs (v_signed): the env gave true physics velocities. Yaw rate is derived inside, from the previous step's yaw over dt.",
+  "Car order: the commander is permutation-equivariant across pursuers; outputs follow input order.",
+  "Trained with NO latency and NO pose noise."
+ ],
+ "known_transfer_gaps": [
+  "Not retrained: the network is the 6 m model's. Scaling keeps the geometry consistent (targets stay inside the tape), but the real car's turning circle, actuation (on/off buttons or ESC) and grip do not scale.",
+  "Contact distances scale with the trained DriftKing (0.44 m x s = 0.134 m), not with the real car, whose size is not settled.",
+  "Evader: a simulated planner at difficulty d = 1, not a human driver."
+ ],
+ "checkpoint": {
+  "timestep": 4000,
+  "evader_difficulty": 1.0
+ },
+ "length_scale": 0.305,
+ "scaled_from": {
+  "model": "c37_commit3_ft_g997",
+  "folder": "artifacts/deploy/c37_commit3_ft_g997",
+  "scale": 0.305,
+  "rule": "every length and every speed/acceleration x s, time unchanged; the network is the source's, byte for byte"
+ }
+}

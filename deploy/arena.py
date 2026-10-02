@@ -5,6 +5,7 @@
                  ./arena setup          install deps on both Orins
                  ./arena tune           pin clocks, WiFi power-save off
   every session  ./arena sync           both Orins onto this checkout's commit, selftests
+                 ./arena fleet          how many pursuers, which model (--pursuers N / --model M sets it)
                  ./arena scan           calibrate + check the arena from the camera
                  ./arena cars           which cars are on the WiFi, and their CAR_INDEX
                  ./arena up             start vision + controller + dashboard (cars DISARMED)
@@ -129,6 +130,7 @@ class Config:
                             c.get("tools_python", "python3"))
         self.model = cp["fleet"]["model"]
         self.esp = cp["fleet"]["esp"]
+        self.pursuers = cp["fleet"].get("pursuers", "auto").strip() or "auto"
         n = cp["net"]
         self.pose_port, self.tel_port = n.getint("pose_port"), n.getint("telemetry_port")
         self.ctl_port, self.preview_port = n.getint("control_port"), n.getint("preview_port")
@@ -223,14 +225,95 @@ def fetch_state(url: str, timeout: float = 1.5) -> dict | None:
         return None
 
 
+# ------------------------------------------------------------------ fleet size
+MODELS = REPO / "portable_n1_controller" / "models"
+MARKER_MAP = REPO / "portable_orin_perception" / "config" / "marker_map.yaml"
+
+
+def model_pursuers(model: str) -> int | None:
+    """How many cars a model drives (num_pursuers in its manifest); None if unreadable."""
+    try:
+        manifest = json.loads((REPO / "portable_n1_controller" / model / "policy.onnx.manifest.json")
+                              .read_text(encoding="utf-8"))
+        return int(manifest["num_pursuers"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def installed_models() -> list[tuple[str, int | None]]:
+    if not MODELS.is_dir():
+        return []
+    return [(f"models/{d.name}", model_pursuers(f"models/{d.name}"))
+            for d in sorted(MODELS.iterdir()) if (d / "policy.onnx").is_file()]
+
+
+def fleet_tags() -> list[int]:
+    """pursuer_ids from marker_map.yaml, in CAR_INDEX order. A regex, not PyYAML:
+    this CLI is stdlib-only so it runs on any python3."""
+    try:
+        text = MARKER_MAP.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    m = re.search(r"^pursuer_ids:\s*\[([^\]]*)\]", text, re.M)
+    return [int(x) for x in m.group(1).split(",") if x.strip()] if m else []
+
+
+def parse_pursuers(value) -> int | None:
+    """'auto' (or nothing) -> None, meaning the model decides; otherwise a car count."""
+    if value is None or str(value).strip().lower() in ("", "auto"):
+        return None
+    try:
+        n = int(value)
+    except ValueError:
+        n = 0
+    if n < 1:
+        die(f"pursuers must be a number of cars (1, 2, 3, ...) or auto, not {value!r}")
+    return n
+
+
+def resolve_fleet(cfg: Config, model: str, pursuers=None) -> int:
+    """How many pursuers drive this session: --pursuers, else [fleet] pursuers, else
+    the model's own count. A model's car count is fixed by its training (its input
+    and output sizes), so the two must agree. A mismatch would make the controller
+    reject every pose frame, so it is refused here, before anything starts."""
+    want = parse_pursuers(pursuers if pursuers is not None else cfg.pursuers)
+    n = model_pursuers(model)
+    if n is None:
+        die(f"cannot read {model}/policy.onnx.manifest.json in this checkout. "
+            "`arena fleet` lists the installed models.")
+    if want is not None and want != n:
+        fits = [m for m, k in installed_models() if k == want]
+        die(f"{model} drives {n} car(s), but the fleet is set to {want}. A model's car count is "
+            "fixed by its training.\n  "
+            + (f"Keep {want} car(s): arena fleet --model {fits[0]}   (installed: {', '.join(fits)})\n  "
+               if fits else f"No installed model drives {want} car(s).\n  ")
+            + f"Switch to {n} car(s): arena fleet --pursuers {n} --model {model}")
+    tags = fleet_tags()
+    if tags and n > len(tags):
+        die(f"{model} drives {n} cars, but config/marker_map.yaml lists only {len(tags)} pursuer tag(s) "
+            f"{tags}. Add the other cars' tag ids to pursuer_ids there.")
+    return n
+
+
+def read_local_conf() -> configparser.ConfigParser:
+    cp = configparser.ConfigParser()
+    if LOCAL_CONF.exists():
+        cp.read(LOCAL_CONF, encoding="utf-8")
+    return cp
+
+
+def write_local_conf(cp: configparser.ConfigParser) -> None:
+    with open(LOCAL_CONF, "w", encoding="utf-8") as fh:
+        fh.write("# Site overrides for deploy/arena.conf (gitignored). Written by `arena init` / `arena fleet`.\n")
+        cp.write(fh)
+
+
 # ------------------------------------------------------------------ commands
 def cmd_init(args, _cfg) -> None:
     def split(spec):
         user, _, host = spec.rpartition("@")
         return user, host
-    cp = configparser.ConfigParser()
-    if LOCAL_CONF.exists():
-        cp.read(LOCAL_CONF, encoding="utf-8")
+    cp = read_local_conf()
     vis, ctl = (args.single, args.single) if args.single else (args.vision, args.control)
     if not (vis and ctl):
         die("give --vision and --control, or --single")
@@ -248,9 +331,7 @@ def cmd_init(args, _cfg) -> None:
             if not cp.has_section("net"):
                 cp.add_section("net")
             cp["net"][key] = value
-    with open(LOCAL_CONF, "w", encoding="utf-8") as fh:
-        fh.write("# Site overrides for deploy/arena.conf (gitignored). Written by `arena init`.\n")
-        cp.write(fh)
+    write_local_conf(cp)
     print(f"wrote {LOCAL_CONF.relative_to(REPO)}")
     cfg = Config()
     for r in cfg.roles():
@@ -259,10 +340,48 @@ def cmd_init(args, _cfg) -> None:
           "  ./arena setup     (first time)     ./arena status")
 
 
+def cmd_fleet(args, cfg: Config) -> None:
+    """Show, or set, how many pursuers drive and with which model."""
+    if args.pursuers is not None or args.model:
+        model = args.model or cfg.model
+        if model_pursuers(model) is None:
+            die(f"{model} is not an installed model (needs {model}/policy.onnx.manifest.json). "
+                "Installed: " + ", ".join(m for m, _ in installed_models()))
+        pursuers = args.pursuers if args.pursuers is not None else cfg.pursuers
+        resolve_fleet(cfg, model, pursuers)          # refuses a mismatch before anything is written
+        n = parse_pursuers(pursuers)
+        cp = read_local_conf()
+        if not cp.has_section("fleet"):
+            cp.add_section("fleet")
+        cp["fleet"]["model"] = model
+        cp["fleet"]["pursuers"] = "auto" if n is None else str(n)
+        write_local_conf(cp)
+        ok(f"saved to {LOCAL_CONF.relative_to(REPO)}")
+        cfg = Config()
+    n = resolve_fleet(cfg, cfg.model)
+    tags = fleet_tags()
+    step(f"fleet: {n} pursuer(s), model {cfg.model}"
+         + ("" if cfg.pursuers == "auto" else f"  ([fleet] pursuers = {cfg.pursuers})"))
+    for i in range(n):
+        tag = tags[i] if i < len(tags) else "?"
+        print(f"  P{i + 1}   tag {tag!s:<3}  CAR_INDEX {i}")
+    if len(tags) > n:
+        print(_c("2", f"  not driving: tag(s) {tags[n:]} (those cars stay parked; their tags are ignored)"))
+    step("installed models")
+    for m, k in installed_models():
+        print(f"  {m:28s} {k if k is not None else '?'} car(s){'   <- in use' if m == cfg.model else ''}")
+    print("\nChange it:  arena fleet --pursuers 3 --model models/<a 3-car model>"
+          "\nOne session only:  arena up --model models/<name>"
+          "\nCheck every car answers with the right CAR_INDEX:  arena cars")
+
+
 def cmd_status(args, cfg: Config) -> None:
     cfg.require_topology()
     head, branch, dirty = local_head()
     print(f"this checkout: {branch} @ {head}{' (+ uncommitted changes)' if dirty else ''}")
+    n_model = model_pursuers(cfg.model)
+    print(f"fleet: {cfg.model} drives {n_model if n_model is not None else '?'} pursuer(s)"
+          + ("" if cfg.pursuers == "auto" else f"; [fleet] pursuers = {cfg.pursuers}"))
     probe = r'''
 echo "host=$(hostname)"
 echo "git=$(git rev-parse --short HEAD 2>/dev/null) $(git rev-parse --abbrev-ref HEAD 2>/dev/null) $( [ -n "$(git status --porcelain 2>/dev/null)" ] && echo dirty)"
@@ -395,6 +514,9 @@ def cmd_scan(args, cfg: Config) -> None:
     cfg.require_topology()
     v = cfg.vision
     extra = " ".join(a for a, on in (("--check", args.check), ("--tune-exposure", args.tune_exposure)) if on)
+    n = parse_pursuers(args.pursuers if args.pursuers is not None else cfg.pursuers) or model_pursuers(cfg.model)
+    if n:
+        extra += f" --pursuers {n}"
     # Taking the camera away stalls a running controller into E-stop, but it stays
     # ARMED, and would drive again the moment poses resume. Disarm it first; a
     # control Orin that is off or unreachable has nothing armed to worry about.
@@ -551,11 +673,12 @@ def cmd_up(args, cfg: Config) -> None:
     v, c = cfg.vision, cfg.control
     model = args.model or cfg.model
     esp = args.esp or cfg.esp
+    n = resolve_fleet(cfg, model, args.pursuers)
     ctrl_addr = _control_addr_from_vision(cfg)
     vis_addr = "127.0.0.1" if cfg.single else (
         v.host if cfg.vision_addr_from_control == "auto" else cfg.vision_addr_from_control)
 
-    step(f"control: {c.target} -- hub + controller ({model}, cars {esp}) DISARMED")
+    step(f"control: {c.target} -- hub + controller ({model}: {n} pursuer(s), cars {esp}) DISARMED")
     run_on(c, f'''
 svc_start hub . {c.tools_python} -u deploy/hub.py --port {cfg.dash_port} --telemetry-port {cfg.tel_port} \
     --control-port {cfg.ctl_port} --preview http://{vis_addr}:{cfg.preview_port}
@@ -567,11 +690,11 @@ svc_start controller portable_n1_controller {c.python} -u run_controller.py --mo
     # (svc_start leaves it alone). `up` promises DISARMED, so make it true before
     # any pose can flow. A controller that is still starting is disarmed anyway.
     _ctl(cfg, "disarm")
-    step(f"vision: {v.target} -- camera -> poses -> {ctrl_addr}:{cfg.pose_port}")
+    step(f"vision: {v.target} -- camera -> poses of {n} pursuer(s) + evader -> {ctrl_addr}:{cfg.pose_port}")
     run_on(v, f'''
 svc_start vision portable_orin_perception {v.python} -u run_vision.py \
     --pose-target {ctrl_addr}:{cfg.pose_port} --telemetry {ctrl_addr}:{cfg.tel_port} \
-    --preview-port {cfg.preview_port}
+    --preview-port {cfg.preview_port} --pursuers {n}
 ''', lib=True, check=True, timeout=30)
 
     step("waiting for the pipeline to come up")
@@ -769,7 +892,8 @@ def cmd_sim(args, cfg: Config) -> None:
     log_dir.mkdir(parents=True, exist_ok=True)
     specs = [
         ("world", REPO / "portable_n1_controller",
-         [py, "-u", "tools/sim_world.py", "--cars", str(n), "--base-port", str(base), "--world-port", "19880"]),
+         [py, "-u", "tools/sim_world.py", "--cars", str(n), "--base-port", str(base), "--world-port", "19880",
+          "--buttons", args.buttons]),
         ("hub", REPO, [py, "-u", "deploy/hub.py", "--port", str(args.port), "--telemetry-port", "19871",
                        "--control-port", "19872", "--preview", "http://127.0.0.1:18090"]),
         ("controller", REPO / "portable_n1_controller",
@@ -777,7 +901,7 @@ def cmd_sim(args, cfg: Config) -> None:
           "--esp", esp, "--telemetry", "127.0.0.1:19871", "--control-port", "19872", "--start-disarmed"]),
         ("vision", REPO / "portable_orin_perception",
          [py, "-u", "run_vision.py", "--synthetic", "--world-port", "19880", "--pose-target", "127.0.0.1:19870",
-          "--telemetry", "127.0.0.1:19871", "--preview-port", "18090"]),
+          "--telemetry", "127.0.0.1:19871", "--preview-port", "18090", "--pursuers", str(n)]),
     ]
     procs = []
     try:
@@ -785,7 +909,8 @@ def cmd_sim(args, cfg: Config) -> None:
             fh = open(log_dir / f"{name}.log", "w", encoding="utf-8")
             procs.append((name, subprocess.Popen(cmd, cwd=cwd, stdout=fh, stderr=subprocess.STDOUT), fh))
         url = f"http://127.0.0.1:{args.port}"
-        print(f"simulated arena up ({n} car(s), model {args.model}); logs in {log_dir}")
+        print(f"simulated arena up ({n} car(s), model {args.model}, "
+              f"actuation {'proportional' if args.buttons == 'off' else 'buttons ' + args.buttons}); logs in {log_dir}")
         print(f"  dashboard  {url}")
         if not args.no_browser:
             import webbrowser
@@ -844,6 +969,10 @@ def main(argv=None) -> None:
 
     sub.add_parser("status", help="both Orins: code version, services, clocks, camera, calibration, alerts") \
         .set_defaults(fn=cmd_status)
+    p = sub.add_parser("fleet", help="how many pursuers drive, and which model; --pursuers / --model change it")
+    p.add_argument("--pursuers", help="number of pursuer cars (1, 2, 3, ...) or auto (= the model's own count)")
+    p.add_argument("--model", help="the model to drive with, e.g. models/n1_catch")
+    p.set_defaults(fn=cmd_fleet)
     p = sub.add_parser("sync", help="put both Orins on this checkout's commit and run the selftests")
     p.add_argument("--push", action="store_true", help="git push this branch first")
     p.set_defaults(fn=cmd_sync)
@@ -854,6 +983,7 @@ def main(argv=None) -> None:
     p = sub.add_parser("scan", help="calibrate + check the arena from the overhead camera")
     p.add_argument("--check", action="store_true", help="verify the saved calibration only (camera moved?)")
     p.add_argument("--tune-exposure", action="store_true", help="find the shortest usable exposure")
+    p.add_argument("--pursuers", help="how many pursuer cars to look for (default: the fleet's)")
     p.set_defaults(fn=cmd_scan)
 
     p = sub.add_parser("cars", help="find the cars on the WiFi; --index sets a car's CAR_INDEX")
@@ -872,6 +1002,7 @@ def main(argv=None) -> None:
     p = sub.add_parser("up", help="start vision + controller + dashboard, cars DISARMED")
     p.add_argument("--model", help="override [fleet] model, e.g. models/n1_pin")
     p.add_argument("--esp", help="override [fleet] esp (auto, or ip:port list)")
+    p.add_argument("--pursuers", help="override [fleet] pursuers for this session (must match the model)")
     p.add_argument("--wait", type=float, default=25.0, help="seconds to wait for a healthy pipeline")
     p.set_defaults(fn=cmd_up)
     sub.add_parser("go", help="ARM: the policy drives the cars").set_defaults(fn=cmd_go)
@@ -895,6 +1026,9 @@ def main(argv=None) -> None:
     p.add_argument("--disarmed", action="store_true", help="do not arm automatically")
     p.add_argument("--no-browser", action="store_true")
     p.add_argument("--monitor", action="store_true", help="also show the terminal monitor here")
+    p.add_argument("--buttons", choices=["off", "mod", "binary"], default="off",
+                   help="sim cars driven through 4 on/off remote buttons like the real V3 cars "
+                        "(mod = time-modulated presses, binary = on/off at 1/3)")
     p.set_defaults(fn=cmd_sim)
 
     args = ap.parse_args(argv)

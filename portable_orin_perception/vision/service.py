@@ -86,7 +86,8 @@ class VisionService:
         self.args = args
         self.log = log
         cfg = BUNDLE_ROOT / "config"
-        self.marker_map = load_marker_map(args.marker_map or cfg / "marker_map.yaml")
+        self.marker_map = load_marker_map(args.marker_map or cfg / "marker_map.yaml").with_pursuers(
+            getattr(args, "pursuers", None))
         cam = load_camera_config(args.camera_config or cfg / "camera.yaml")
         self.cam: CameraConfig = cam.with_overrides(device=args.device)
 

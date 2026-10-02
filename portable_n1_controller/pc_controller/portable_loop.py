@@ -44,6 +44,10 @@ class PortableLoop:
         )
         self.latency_budget = LatencyBudget(latency_budget_s)
 
+    @property
+    def capture_radius(self) -> float:
+        return float(getattr(self.adapter.env, "capture_radius", 0.0))
+
     def reset(self) -> None:
         """Clear pose/action history at episode start or after a real-world re-arm."""
         self.adapter = ObservationAdapter(self.adapter.env, rate_limit_speed=self._rate_limit_speed)

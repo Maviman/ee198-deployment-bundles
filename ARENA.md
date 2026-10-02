@@ -21,7 +21,7 @@ terminal.
                                   │
                                   │ UDP :8888 commands (DSCP EF = WiFi voice queue)
                                   ▼
-                     ESP32 on each car ── L298N (drive) + servo (steer)
+                     ESP32 on each car ── presses the car's RC remote (FWD/BACK/LEFT/RIGHT)
 ```
 
 ## Why the work is split this way
@@ -103,7 +103,11 @@ figures live. Record them the first session.
    `arena` uses key-based SSH to each Orin from wherever you run it:
    `ssh-copy-id jordan@<host>` once per machine. To run `arena` on the control
    Orin itself, give it a key to the vision Orin the same way.
-3. **Install** (asks for the sudo password on each Orin): `./arena setup`
+3. **Install** (asks for the sudo password on each Orin): `./arena setup`.
+   **No internet on the Orins?** Use the offline install folders instead:
+   `python deploy/offline/build_packages.py` on a PC that has internet, then
+   follow `START_HERE` in each folder ([deploy/offline/README.md](deploy/offline/README.md)).
+   Re-running an install folder also replaces `./arena sync`.
 4. **Tune** (after every reboot: neither setting persists): `./arena tune`
    pins the CPU clocks (~1.45× faster detection) and turns WiFi power-save
    off (power-save adds 100 ms+ naps to the radio).
@@ -139,6 +143,53 @@ the dashboard raises **"corner tags moved"** if they drift.
 `./arena scan --tune-exposure` finds the shortest exposure that is bright
 enough for the room and saves it (`config/camera.local.yaml`). Shorter exposure
 means less motion blur on a moving tag.
+
+## How many pursuers
+
+**The deployed model is `n1_catch`, one pursuer** (locked in
+`deploy/arena.conf`: `model = models/n1_catch`, `pursuers = 1`). The arena
+runs it unless you deliberately switch.
+
+`config/marker_map.yaml` lists the whole fleet in slot order: tag 1 = P1 =
+CAR_INDEX 0, tag 2 = P2 = CAR_INDEX 1, tag 3 = P3 = CAR_INDEX 2. How many of
+them drive must equal the **model's** car count (`num_pursuers` in its
+manifest). `arena up` tells the vision Orin to track only that many and ignore
+the other tags.
+
+```bash
+./arena fleet                                         # count, model, tag -> CAR_INDEX, installed models
+./arena fleet --pursuers 3 --model models/c37_commit3_ft_g997_arena183   # 3 cars, from now on
+./arena fleet --pursuers 1 --model models/n1_catch        # back to the locked default
+./arena up --model models/<name>                      # one session; the count follows the model
+./arena cars                                          # every car answers, with the right CAR_INDEX?
+```
+
+A model's car count is fixed by its training. When the count and the model
+disagree, `arena up` and `arena fleet` refuse before anything starts, and name
+an installed model that fits. If they disagreed at runtime, the controller
+would reject every pose frame and the cars would sit in failsafe.
+
+Two kinds of model run on the same commands, picked by the manifest's
+`runtime` field (`pc_controller/loops.py`):
+
+- **Flat policies** (no `runtime` key; `n1_catch`, `n1_pin`) run through `PortableLoop`.
+- **Role commanders** (`"runtime": "hive_commander_v1"`, the hive model) run
+  through the vendored runtime in `pc_controller/runtimes/`. For these, the
+  dashboard colours each pursuer by its current role.
+
+The hive commander from the AI Training repo (three pursuers, one shared
+network) ships twice. Both replay their golden vectors exactly in `selftest.py`:
+
+| model | what | `arena sim`, captures in 60 s |
+|---|---|---|
+| `models/c37_commit3_ft_g997_arena183` | **use this one**: the same network in a world scaled ×0.305 to the 1.83 m arena, so its role targets stay inside the tape | 11 (4 with `--buttons mod`) |
+| `models/c37_commit3_ft_g997` | as trained: a 6 m walled arena | 3 and 6 in two runs |
+
+These are single short runs, against an easy simulated evader, with instant
+steering (`n1_catch`: 10). The network was trained on a simulated car with
+throttle as a speed command and no noise or latency, and that does not scale.
+Treat 3-car runs as experiments until a retrain on the real car. The model
+READMEs list the gaps.
 
 ## Watching a run
 
@@ -188,7 +239,8 @@ Every hop fails to *stopped*:
 ## Rehearsal with no hardware
 
 ```bash
-./arena sim            # opens the dashboard; Ctrl-C to stop
+./arena sim                    # opens the dashboard; Ctrl-C to stop
+./arena sim --buttons mod      # sim cars driven through on/off remote buttons, like the real V3 cars
 ```
 
 Runs everything on this machine through the production code paths. A

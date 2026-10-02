@@ -1,5 +1,6 @@
 /*
- * ESP32 command receiver for the EE198 pursuit car.
+ * ESP32 command receiver for the EE198 pursuit car -- V3: it presses the
+ * buttons of the car's own RC remote.
  *
  * Listens on UDP port 8888 for JSON command packets from run_controller.py:
  *   {"seq": 42, "t": 1720300000.123, "estop": false, "cmd": [[0.43, -0.10]]}
@@ -25,98 +26,81 @@
  *  stored value wins once one has ever been set.
  *
  * SAFETY CONTRACT (do not weaken):
- *  - If no packet arrives for FAILSAFE_TIMEOUT_MS -> both channels to neutral.
- *  - estop:true -> neutral immediately, regardless of cmd.
+ *  - If no packet arrives for FAILSAFE_TIMEOUT_MS -> every button released.
+ *  - estop:true -> every button released immediately, regardless of cmd.
  *  - Packets with seq <= the last applied seq are dropped (stale/reordered).
- *  - If cmd[] has no entry for THIS car's index -> neutral and failsafe, exactly
- *    as if no packet had arrived. A car with no command must look identical to
- *    a car with no link; it must never coast on a stale value or read a
- *    neighbour's.
+ *  - If cmd[] has no entry for THIS car's index -> released and failsafe,
+ *    exactly as if no packet had arrived. A car with no command must look
+ *    identical to a car with no link; it must never coast on a stale value or
+ *    read a neighbour's.
+ *  - Opposite buttons (FWD+BACK, LEFT+RIGHT) are never pressed together, and a
+ *    change of direction always passes through a released gap.
  *
  * ARENA TOOLING (the `arena` CLI at the repo root):
  *  - Discovery: a {"probe":1} datagram gets an info reply (index, IP, MAC,
- *    firmware, failsafe state) and has NO effect on the outputs. This is how
- *    `run_controller.py --esp auto` and `arena cars` find the fleet without
- *    anyone reading IPs off a serial monitor.
+ *    firmware, failsafe state, button mode) and has NO effect on the outputs.
+ *    This is how `run_controller.py --esp auto` and `arena cars` find the fleet.
  *  - Remote index: {"cfg":{"index":n}} sets CAR_INDEX like the serial command,
  *    but ONLY while this car is in failsafe (not being driven).
  *  - OTA firmware updates (`arena flash --ota`): enabled only when
  *    wifi_credentials.h defines OTA_PASSWORD, and serviced ONLY while the car
  *    is in failsafe. An update can never start on a car that is driving.
  *
- * Libraries (Arduino IDE -> Library Manager):
- *  - ArduinoJson (Benoit Blanchon)
- *  (No servo library: the steering servo is driven from the ESP32's own LEDC
- *  peripheral -- see LEDC CHANNEL MAP below for why that is deliberate.)
+ * Libraries: ArduinoJson (Benoit Blanchon). Nothing else.
  *
- * HARDWARE MAPPING -- V2 chassis, SPLIT drivetrain. The two channels are
- * driven by completely different hardware; they are not symmetric.
+ * HARDWARE -- the ESP32 presses the 4 buttons of the car's handheld remote:
+ *   FWD, BACK, LEFT, RIGHT. Each button is shorted by an NPN transistor whose
+ *   base is driven from one GPIO through a resistor (the breadboard in the
+ *   2026-10-02 photo): GPIO HIGH = button pressed. ESP32 GND must be common
+ *   with the remote's GND. REQUIRED: a 100 k resistor from each transistor's
+ *   base to its emitter. The GPIOs float from power-on through the ROM
+ *   bootloader (~0.3 s, longer while flashing) until setup() drives them; the
+ *   pull-down is what keeps a floating pin from pressing a button then.
  *
- *  THROTTLE -- 7.4 V brushed DC motor on an L298N H-bridge:
- *   - OUT3/OUT4 -> drive motor, commanded through IN3/IN4.
- *   - ENA/ENB are physically JUMPER-CAPPED on this board (tied permanently
- *     HIGH), so speed control is NOT available through ENA/ENB. Instead we
- *     PWM one of the two IN pins per channel (chopping that direction's drive
- *     voltage) and hold the other IN pin LOW; this is a standard, valid
- *     technique when EN is tied high. Direction is which IN pin carries PWM.
- *   - The L298N's OTHER channel (OUT1/OUT2, IN1/IN2) is now UNUSED -- steering
- *     left the H-bridge when it became a servo. If IN1/IN2 are still jumpered
- *     to the old GPIO 15/16, UNPLUG THEM: this sketch no longer drives those
- *     pins, and a floating L298N input can wander across the logic threshold
- *     and drive whatever is left on OUT1/OUT2.
- *   - The L298N is a Darlington bridge and drops ~1.5-2 V across itself, so a
- *     7.4 V pack puts only ~5.5-6 V at the motor even at 100% duty. Keep that
- *     in mind when reading THROTTLE_MAX_DUTY -- the duty number is a fraction
- *     of ~5.5-6 V, not of 7.4 V.
- *   - Reverse is symmetric with forward here, which the policy needs: n1_catch
- *     does sometimes drive backwards to a capture. An H-bridge has no
- *     double-tap-to-reverse lockout, so unlike a toy ESC this satisfies that
- *     requirement natively.
+ *   The remote, not this board, now sets how hard the car drives: its buttons
+ *   are on/off. Two ways to turn a proportional command into button presses:
  *
- *  STEERING -- 3-wire hobby servo, driven straight off the ESP32:
- *   - Signal -> STEER_PIN. V+ -> ESP32 5V. GND -> ESP32 GND (which must also be
- *     common with the L298N's GND, or the H-bridge sees no valid logic levels).
- *     The servo does NOT touch the L298N.
- *   - This is a POSITIONAL servo, so "steer" is an absolute wheel ANGLE that
- *     the servo holds -- unlike the old DC-motor steering, where steer meant
- *     "turn the wheel this way at this rate." Neutral = wheels straight.
- *   - BROWN-OUT RISK: a servo slewing fast, or stalled against a mechanical
- *     stop, can pull 0.5-1 A. Off the ESP32's 5V rail that can sag the board
- *     into a reboot mid-run (which the failsafe will read as a stalled stream).
- *     Two mitigations, in order: (a) the reduced STEER_MIN/MAX_US throw below
- *     keeps the linkage off its stops, (b) a 470-1000 uF cap across the
- *     servo's V+/GND right at its connector. If reboots persist, move the
- *     servo's V+ to the L298N's onboard 5V regulator output instead (valid
- *     while the motor pack is <= 12 V) and keep grounds common.
+ *   MODULATED (default): each axis presses its button for a FRACTION of the
+ *     time equal to |command|, like a person feathering a button. A
+ *     first-order sigma-delta decides per SLOT_MS slot whether the button is
+ *     down; the remainder carries over, so the average press time tracks the
+ *     command exactly. The car's inertia (throttle) and the steering servo's
+ *     slew time (steer) smooth the pulses into partial speed and partial
+ *     steering angle. This WORKS ONLY IF the remote registers presses as short
+ *     as SLOT_MS: a remote that debounces or scans slower than that drops the
+ *     short presses. Tune `slot` (below) on the real remote, wheels off.
+ *   BINARY: a button is down while |command| >= BINARY_THRESHOLD (1/3, the
+ *     same cut the hive training uses for an on/off car), up otherwise.
  *
- *  SIGN CONVENTION IS UNVERIFIED against physical wiring. For throttle, which
- *  IN pin is "forward" depends on which OUT terminal the motor's + lead is on;
- *  for steering, which end of the pulse range is "left" depends on how the
- *  servo horn is splined onto the linkage. Neither is knowable from software.
- *  If forward/reverse comes out backwards, swap the two IN pin arguments in
- *  the driveMotor() call (or the wires at OUT3/OUT4). If left/right comes out
- *  backwards, swap STEER_MIN_US and STEER_MAX_US. Do not assume either is
- *  correct without watching it move.
+ *   Switch at runtime over serial (saved in NVS): `mode mod` / `mode binary`.
  *
- * LEDC CHANNEL MAP -- why the servo and the motor cannot fight:
- *  Both the motor PWM and the servo frame come out of the same LEDC
- *  peripheral, and an accidental channel/timer collision would silently
- *  corrupt one of them. Arduino-ESP32 2.x analogWrite() allocates LEDC
- *  channels counting DOWN from 7, so the two throttle pins take channels 7
- *  and 6 -- both on LEDC timer 3, since timer = (channel / 2) % 4. The servo
- *  is pinned explicitly to channel 0, i.e. timer 0. The motor's 1 kHz / 8-bit
- *  timer setup therefore never touches the timer carrying the servo's 50 Hz
- *  frame. Verified against framework-arduinoespressif32 3.20017 (core 2.0.17),
- *  which platformio.ini pins. This is also why the servo is raw LEDC rather
- *  than ESP32Servo: that library allocates channels counting UP from 0 with no
- *  knowledge of analogWrite's allocations, so the two share one guessable
- *  channel space instead of a stated one.
+ * SERIAL COMMANDS (115200 baud; also listed by typing anything else). Every
+ * command that CHANGES something is refused while the car is being driven:
+ * a settings save can stall the chip for tens of ms with a button held down.
+ *   index [n]                    show / set CAR_INDEX
+ *   mode [mod|binary]            show / set the button mode
+ *   slot [ms]                    show / set the modulation slot (15..200 ms)
+ *   limit [0.1..1]               show / set the throttle limit (modulated mode)
+ *   pins [fwd back left right]   show / set the four button GPIOs
+ *   test                         press FWD, BACK, LEFT, RIGHT in turn (wheels OFF)
+ *
+ * PIN RULES (ESP32-S3-WROOM-1, DevKitC-1). The setter refuses anything else:
+ *   OK:     1 2 4-18 21 39-42 47
+ *   NEVER:  0 3 45 46 (strapping: some are pulled up at reset, so the button
+ *           would be pressed while the chip boots), 19 20 (native USB),
+ *           43 44 (UART0 = the serial console: every log line would press the
+ *           button), 26-32 (flash), 33-37 (PSRAM on the -R8 modules),
+ *           38 48 (the RGB LED on the DevKitC).
+ *   Defaults 1 2 42 41 are the first four usable pins of the right-hand header
+ *   (under GND TX RX). Which wire is which button is only knowable by looking:
+ *   run `test` with the wheels off, then `pins ...` to match.
  */
 
 #include <WiFi.h>
 #include <WiFiUdp.h>
 #include <ArduinoJson.h>
 #include <Preferences.h>
+#include "button_mod.h"   // command -> button presses (shared with esp32/test_host)
 
 // ---- EDIT THESE ------------------------------------------------------------
 // WiFi credentials live in wifi_credentials.h (gitignored, stays local).
@@ -128,65 +112,31 @@
 #include <ArduinoOTA.h>
 #endif
 
-#define FW_VERSION "2026.09-arena"
+#define FW_VERSION "2026.10-buttons"
 
 const uint16_t UDP_PORT = 8888;
 
 // Fallback index used only until one is stored in NVS (see CAR INDEX above).
-// Deliberately 0 so a single-car setup works with no extra step; the moment a
-// second car exists, set both explicitly over serial rather than relying on it.
 #ifndef DEFAULT_CAR_INDEX
 #define DEFAULT_CAR_INDEX 0
 #endif
 const int MAX_CARS = 8;   // sanity bound on an index typed over serial
 
-// Pin assignments (ESP32-S3 DevKitC-1: GPIO 25/26 do NOT exist on the S3,
-// avoid that reserved range -- these three are free, safe pins; 5 is the same
-// pin the pre-L298N build used for steering).
-const int THROTTLE_IN3_PIN = 6;   // L298N IN3 -> drive motor, OUT3
-const int THROTTLE_IN4_PIN = 7;   // L298N IN4 -> drive motor, OUT4
-const int STEER_PIN        = 5;   // steering servo signal (white/orange wire)
+// Default button GPIOs: FWD, BACK, LEFT, RIGHT (see PIN RULES above). The
+// stored set (serial `pins`) wins once one has been saved.
+const int DEFAULT_PINS[4] = {1, 2, 42, 41};
+// true: GPIO HIGH presses the button (NPN low-side switch, as on the breadboard).
+const bool BUTTON_ACTIVE_HIGH = true;
 
-// Throttle PWM duty cap, 0-255 scale (analogWrite range). Below DEADBAND both
-// IN pins go LOW (coast/stop) rather than chattering direction at tiny
-// commanded values.
-//
-// RE-TUNE THIS FIRST, WHEELS OFF. The old cap of 70 was a mitigation for a
-// problem that no longer exists: steering used to be a second DC motor sharing
-// the L298N's single motor rail, and the drive motor's current draw sagged that
-// shared rail enough to starve it. Steering is now a servo on the ESP32's 5V,
-// so the drive motor has the whole pack to itself. But the pack also went from
-// 4xAA (6 V nominal, sagging hard under load) to 7.4 V, so the SAME duty number
-// now delivers noticeably more motor voltage than it did on the old car -- the
-// old value is not a safe baseline in either direction. 60 is a deliberately
-// gentle restart on the new pack. Raise in steps of ~15, wheels off, until the
-// wheel speed looks like something you want on the floor.
-const int THROTTLE_MAX_DUTY = 60;   // ~24% of 255
-const double DEADBAND = 0.05;
-
-// Steering servo pulse widths, microseconds. Center is the trim: adjust until
-// the wheels sit straight with the car powered and neutral.
-//
-// The throw is deliberately narrower than the usual 1000-2000 us. This is a
-// toy-grade linkage with limited mechanical travel, and commanding the servo
-// past where the linkage physically stops means it stalls there, drawing its
-// full stall current off the ESP32's 5V rail (see BROWN-OUT RISK above) and
-// cooking itself. Widen these toward 1000/2000 only after checking by hand
-// where the linkage actually binds.
-const int STEER_CENTER_US = 1500;
-const int STEER_MIN_US    = 1200;   // full RIGHT (-steer)
-const int STEER_MAX_US    = 1800;   // full LEFT  (+steer)
+// Defaults for the runtime settings (serial `mode`, `slot`, `limit`).
+const bool   DEFAULT_MODULATED = true;
+const int    DEFAULT_SLOT_MS   = 40;     // a press this short must still register on the remote
+const double DEFAULT_THROTTLE_LIMIT = 0.6;   // modulated mode: max press fraction for throttle.
+                                              // Deliberately gentle; raise wheels-off.
+// Deadband, full-on, binary threshold and the reversing gap: see button_mod.h.
 // ----------------------------------------------------------------------------
 
 const unsigned long FAILSAFE_TIMEOUT_MS = 300;  // matches tools/mock_esp.py
-
-// Servo LEDC setup. 50 Hz = the standard 20 ms hobby-servo frame; 16-bit gives
-// 20000 us / 65536 = 0.31 us of pulse resolution, far finer than any servo
-// resolves. Channel 0 is pinned on purpose -- see LEDC CHANNEL MAP above.
-const int SERVO_LEDC_CHANNEL = 0;
-const int SERVO_LEDC_FREQ_HZ = 50;
-const int SERVO_LEDC_BITS    = 16;
-const uint32_t SERVO_FRAME_US = 1000000UL / SERVO_LEDC_FREQ_HZ;
 
 WiFiUDP udp;
 Preferences prefs;
@@ -199,9 +149,85 @@ bool carIndexWasStored = false;
 unsigned long lastSlotWarnMs = 0;
 bool otaEnabled = false;
 
-// Persist the car index in NVS so one binary serves the whole fleet and the
-// setting survives a reflash. Returns false on an out-of-range request rather
-// than storing something that would silently drive the wrong slot.
+bool modulated = DEFAULT_MODULATED;
+int slotMs = DEFAULT_SLOT_MS;
+double throttleLimit = DEFAULT_THROTTLE_LIMIT;
+int pins[4] = {DEFAULT_PINS[0], DEFAULT_PINS[1], DEFAULT_PINS[2], DEFAULT_PINS[3]};
+const char *PIN_NAMES[4] = {"FWD", "BACK", "LEFT", "RIGHT"};
+
+// One axis = two opposite buttons: throttle = FWD (0) / BACK (1), steer =
+// LEFT (2) / RIGHT (3), as indices into pins[].
+btnmod::Axis throttleAxis(true);
+btnmod::Axis steerAxis(false);
+unsigned long nextSlotMs = 0;
+
+// ------------------------------------------------------------------ buttons
+void writeButton(int b, bool pressed) {
+  digitalWrite(pins[b], (pressed == BUTTON_ACTIVE_HIGH) ? HIGH : LOW);
+}
+
+void releaseAll() {
+  for (int b = 0; b < 4; b++) writeButton(b, false);
+}
+
+// A pin that no longer carries a button: keep driving the released level, so a
+// transistor still wired to it stays off instead of floating.
+void parkPin(int p) {
+  pinMode(p, OUTPUT);
+  digitalWrite(p, BUTTON_ACTIVE_HIGH ? LOW : HIGH);
+}
+
+bool pinAllowed(int p) {
+  static const int ok[] = {1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18,
+                           21, 39, 40, 41, 42, 47};
+  for (int v : ok) if (v == p) return true;
+  return false;
+}
+
+void configurePins() {
+  for (int b = 0; b < 4; b++) {
+    pinMode(pins[b], OUTPUT);
+    writeButton(b, false);
+  }
+}
+
+void goNeutral() {
+  btnmod::reset(throttleAxis);
+  btnmod::reset(steerAxis);
+  releaseAll();
+}
+
+// One slot for one axis: button_mod.h decides, this writes the two GPIOs.
+void axisSlot(btnmod::Axis &a, int posBtn, int negBtn) {
+  btnmod::Press p = btnmod::step(a, modulated, throttleLimit);
+  writeButton(posBtn, p.pos);
+  writeButton(negBtn, p.neg);
+}
+
+// Called every loop(): runs the slots that are due. A late loop() catches up
+// one slot at a time rather than bursting, and never presses on a stale plan.
+void serviceSlots() {
+  unsigned long now = millis();
+  if ((long)(now - nextSlotMs) < 0) return;
+  axisSlot(throttleAxis, 0, 1);
+  axisSlot(steerAxis, 2, 3);
+  nextSlotMs += slotMs;
+  // Every slot lasts at least half a slot, however late this loop() was: a
+  // squeezed slot could shrink a reversal's released gap to nothing.
+  if ((long)(nextSlotMs - now) < (long)(slotMs / 2)) nextSlotMs = now + slotMs;
+}
+
+// A new command. A stop or a reversal releases that axis NOW; any press waits
+// for the next slot (at most slotMs away), where button_mod.h also owes the
+// reversal gap.
+void applyCommand(double thr, double str) {
+  if (btnmod::releaseNow(throttleAxis, thr)) { writeButton(0, false); writeButton(1, false); }
+  if (btnmod::releaseNow(steerAxis, str))    { writeButton(2, false); writeButton(3, false); }
+  throttleAxis.cmd = thr;
+  steerAxis.cmd = str;
+}
+
+// ------------------------------------------------------------------ settings
 bool setCarIndex(int idx) {
   if (idx < 0 || idx >= MAX_CARS) return false;
   carIndex = idx;
@@ -210,105 +236,190 @@ bool setCarIndex(int idx) {
   return true;
 }
 
+void loadSettings() {
+  int stored = prefs.getInt("car_index", -1);
+  carIndexWasStored = (stored >= 0 && stored < MAX_CARS);
+  carIndex = carIndexWasStored ? stored : DEFAULT_CAR_INDEX;
+  modulated = prefs.getBool("btn_mod", DEFAULT_MODULATED);
+  int s = prefs.getInt("slot_ms", DEFAULT_SLOT_MS);
+  slotMs = (s >= 15 && s <= 200) ? s : DEFAULT_SLOT_MS;
+  double lim = prefs.getDouble("thr_limit", DEFAULT_THROTTLE_LIMIT);
+  throttleLimit = (lim >= 0.1 && lim <= 1.0) ? lim : DEFAULT_THROTTLE_LIMIT;
+  bool ok = true;
+  int p[4];
+  for (int b = 0; b < 4; b++) {
+    char key[8];
+    snprintf(key, sizeof(key), "pin%d", b);
+    p[b] = prefs.getInt(key, DEFAULT_PINS[b]);
+    ok = ok && pinAllowed(p[b]);
+  }
+  for (int b = 0; b < 4 && ok; b++)
+    for (int c = b + 1; c < 4; c++) ok = ok && p[b] != p[c];
+  for (int b = 0; b < 4; b++) pins[b] = ok ? p[b] : DEFAULT_PINS[b];
+}
+
+void printSettings() {
+  Serial.printf("buttons: FWD=GPIO%d BACK=GPIO%d LEFT=GPIO%d RIGHT=GPIO%d | mode %s",
+                pins[0], pins[1], pins[2], pins[3], modulated ? "MODULATED" : "BINARY");
+  Serial.printf(", slot %d ms", slotMs);
+  if (modulated) Serial.printf(", throttle limit %.2f", throttleLimit);
+  Serial.println();
+}
+
+// `test`: press each button in turn so the wiring can be checked by eye.
+// Blocking on purpose and refused while driving; the car must be wheels off.
+void runButtonTest() {
+  if (!failsafeActive) {
+    Serial.println("REFUSED: the car is being driven. Stop the controller first.");
+    return;
+  }
+  Serial.println("TEST: wheels OFF the ground. Pressing each button for 0.4 s:");
+  for (int b = 0; b < 4; b++) {
+    Serial.printf("  %-5s GPIO%d\n", PIN_NAMES[b], pins[b]);
+    writeButton(b, true);
+    delay(400);
+    writeButton(b, false);
+    delay(400);
+  }
+  Serial.println("TEST done. Wrong button? Set the order with: pins <fwd> <back> <left> <right>");
+}
+
+// Strict integer/real parsing: "two", "3x" or an empty string is rejected, not
+// read as 0 (atoi would make `index two` set index 0 -- a duplicate-index mix-up).
+bool parseLong(const char *s, long &out) {
+  char *end;
+  out = strtol(s, &end, 10);
+  while (*end == ' ') end++;
+  return end != s && *end == '\0';
+}
+
+bool parseReal(const char *s, double &out) {
+  char *end;
+  out = strtod(s, &end);
+  while (*end == ' ') end++;
+  return end != s && *end == '\0' && out == out;
+}
+
+bool refusedWhileDriving() {
+  if (failsafeActive) return false;
+  Serial.println("REFUSED: the car is being driven. Stop the controller first.");
+  return true;
+}
+
 void handleConsoleLine(char *line) {
   while (*line == ' ') line++;
-  if (strncmp(line, "index", 5) != 0) {
-    if (*line) Serial.println("commands: index | index <n>");
-    return;
-  }
-  char *arg = line + 5;
-  while (*arg == ' ') arg++;
-  if (*arg == '\0') {
-    Serial.printf("car index = %d (drives cmd[%d])\n", carIndex, carIndex);
-    return;
-  }
-  if (setCarIndex(atoi(arg))) {
-    Serial.printf("car index set to %d (saved) -- now drives cmd[%d]\n",
-                  carIndex, carIndex);
-  } else {
-    Serial.printf("REJECTED: index must be 0..%d, got '%s'\n", MAX_CARS - 1, arg);
+  char *arg = strchr(line, ' ');
+  if (arg) { *arg++ = '\0'; while (*arg == ' ') arg++; }
+  bool hasArg = arg && *arg;
+  long n;
+  double v;
+
+  if (strcmp(line, "index") == 0) {
+    if (!hasArg) {
+      Serial.printf("car index = %d (drives cmd[%d])\n", carIndex, carIndex);
+    } else if (refusedWhileDriving()) {
+    } else if (parseLong(arg, n) && setCarIndex((int)n)) {
+      Serial.printf("car index set to %d (saved) -- now drives cmd[%d]\n", carIndex, carIndex);
+    } else {
+      Serial.printf("REJECTED: index must be a number 0..%d, got '%s'\n", MAX_CARS - 1, arg);
+    }
+  } else if (strcmp(line, "mode") == 0) {
+    if (hasArg && !refusedWhileDriving()) {
+      if (strcmp(arg, "mod") == 0 || strcmp(arg, "binary") == 0) {
+        goNeutral();
+        modulated = strcmp(arg, "mod") == 0;
+        prefs.putBool("btn_mod", modulated);
+      } else {
+        Serial.println("REJECTED: mode mod | mode binary");
+      }
+    }
+    printSettings();
+  } else if (strcmp(line, "slot") == 0) {
+    if (hasArg && !refusedWhileDriving()) {
+      if (parseLong(arg, n) && n >= 15 && n <= 200) { slotMs = (int)n; prefs.putInt("slot_ms", slotMs); }
+      else Serial.println("REJECTED: slot must be 15..200 ms");
+    }
+    printSettings();
+  } else if (strcmp(line, "limit") == 0) {
+    if (hasArg && !refusedWhileDriving()) {
+      if (parseReal(arg, v) && v >= 0.1 && v <= 1.0) { throttleLimit = v; prefs.putDouble("thr_limit", v); }
+      else Serial.println("REJECTED: limit must be 0.1..1");
+    }
+    printSettings();
+  } else if (strcmp(line, "pins") == 0) {
+    if (hasArg && !refusedWhileDriving()) {
+      int p[4];
+      char extra;
+      int got = sscanf(arg, "%d %d %d %d %c", &p[0], &p[1], &p[2], &p[3], &extra);
+      bool ok = (got == 4);
+      for (int b = 0; b < 4 && ok; b++) {
+        ok = pinAllowed(p[b]);
+        for (int c = 0; c < b && ok; c++) ok = p[b] != p[c];
+      }
+      if (!ok) {
+        Serial.println("REJECTED: pins <fwd> <back> <left> <right>, four different pins from "
+                       "1 2 4-18 21 39-42 47 (see PIN RULES in the source)");
+      } else {
+        releaseAll();
+        for (int b = 0; b < 4; b++) {
+          parkPin(pins[b]);                 // the old pin stays released
+          pins[b] = p[b];
+          char key[8];
+          snprintf(key, sizeof(key), "pin%d", b);
+          prefs.putInt(key, p[b]);
+        }
+        configurePins();
+      }
+    }
+    printSettings();
+  } else if (strcmp(line, "test") == 0) {
+    runButtonTest();
+  } else if (*line) {
+    Serial.println("commands: index [n] | mode [mod|binary] | slot [ms] | limit [0.1..1] | "
+                   "pins [fwd back left right] | test");
   }
 }
 
-// Serial console: "index" reports, "index <n>" sets.
-//
-// Character-at-a-time on purpose. Serial.readStringUntil() BLOCKS for the full
-// serial timeout (1 s by default) whenever a partial line is buffered with no
-// newline yet -- which would stall the UDP poll below and trip the car's own
-// failsafe. The control loop has absolute priority; nothing here may ever wait.
+// Serial console, character-at-a-time on purpose. Serial.readStringUntil()
+// BLOCKS for the full serial timeout (1 s by default) whenever a partial line
+// is buffered with no newline yet -- which would stall the UDP poll and trip
+// the car's own failsafe. The control loop has priority; nothing here waits
+// (except `test`, which only runs in failsafe).
 void pollSerialConsole() {
-  static char buf[32];
+  static char buf[48];
   static uint8_t len = 0;
+  static bool overflow = false;
   while (Serial.available()) {
     char c = (char)Serial.read();
     if (c == '\n' || c == '\r') {
-      if (len > 0) {
+      if (overflow) {
+        Serial.println("REJECTED: line too long, ignored");
+      } else if (len > 0) {
         buf[len] = '\0';
         handleConsoleLine(buf);
-        len = 0;
       }
+      len = 0;
+      overflow = false;
     } else if (len < sizeof(buf) - 1) {
       buf[len++] = c;
-    }  // else: over-long line, drop the excess rather than overflow
+    } else {
+      overflow = true;       // a cut-off command is never executed
+    }
   }
 }
 
-// Drive the L298N throttle channel from a normalized [-1, 1] command: PWMs
-// whichever IN pin corresponds to the commanded direction, holds the other
-// LOW. Both LOW inside the deadband (coast/stop) -- see HARDWARE MAPPING for
-// why PWM lands on the IN pins instead of ENA/ENB.
-void driveMotor(int pinA, int pinB, double normalized, int maxDuty) {
-  if (normalized > 1.0) normalized = 1.0;
-  if (normalized < -1.0) normalized = -1.0;
-  if (fabs(normalized) < DEADBAND) {
-    analogWrite(pinA, 0);
-    analogWrite(pinB, 0);
-    return;
-  }
-  int duty = (int)(fabs(normalized) * maxDuty);
-  if (normalized > 0) {
-    analogWrite(pinA, duty);
-    analogWrite(pinB, 0);
-  } else {
-    analogWrite(pinA, 0);
-    analogWrite(pinB, duty);
-  }
-}
-
-// Emit one servo pulse width, clamped to the configured throw so no code path
-// can command the linkage into its mechanical stop.
-void writeSteerUs(int us) {
-  if (us < STEER_MIN_US) us = STEER_MIN_US;
-  if (us > STEER_MAX_US) us = STEER_MAX_US;
-  uint32_t duty = ((uint32_t)us << SERVO_LEDC_BITS) / SERVO_FRAME_US;
-  ledcWrite(SERVO_LEDC_CHANNEL, duty);
-}
-
-// Normalized [-1, 1] steer -> pulse width. Each side is scaled against its own
-// half of the throw, so an off-center STEER_CENTER_US trim still reaches both
-// extremes instead of clipping one side early.
-void driveSteer(double normalized) {
-  if (normalized > 1.0) normalized = 1.0;
-  if (normalized < -1.0) normalized = -1.0;
-  double span = (normalized >= 0.0) ? (STEER_MAX_US - STEER_CENTER_US)
-                                    : (STEER_CENTER_US - STEER_MIN_US);
-  writeSteerUs((int)(STEER_CENTER_US + normalized * span));
-}
-
-void goNeutral() {
-  driveMotor(THROTTLE_IN3_PIN, THROTTLE_IN4_PIN, 0.0, THROTTLE_MAX_DUTY);
-  driveSteer(0.0);  // wheels straight
-}
-
+// ------------------------------------------------------------------ network
 // Discovery / status reply. Pure information: reading it changes nothing.
 void sendInfo(IPAddress ip, uint16_t port) {
-  char buf[256];
+  char buf[320];
   snprintf(buf, sizeof(buf),
            "{\"car\":%d,\"fw\":\"%s\",\"mac\":\"%s\",\"failsafe\":%s,"
-           "\"up_s\":%lu,\"last_seq\":%ld,\"rssi\":%d,\"ota\":%s,\"duty_max\":%d}",
+           "\"up_s\":%lu,\"last_seq\":%ld,\"rssi\":%d,\"ota\":%s,"
+           "\"act\":\"buttons4\",\"mode\":\"%s\",\"slot_ms\":%d,\"thr_limit\":%.2f}",
            carIndex, FW_VERSION, WiFi.macAddress().c_str(),
            failsafeActive ? "true" : "false", millis() / 1000UL, lastSeq,
-           WiFi.RSSI(), otaEnabled ? "true" : "false", THROTTLE_MAX_DUTY);
+           WiFi.RSSI(), otaEnabled ? "true" : "false",
+           modulated ? "mod" : "binary", slotMs, throttleLimit);
   udp.beginPacket(ip, port);
   udp.write((const uint8_t*)buf, strlen(buf));
   udp.endPacket();
@@ -342,7 +453,7 @@ void setupOta() {
   ArduinoOTA.setPassword(OTA_PASSWORD);
   ArduinoOTA.onStart([]() {
     goNeutral();          // belt and braces: OTA is only serviced in failsafe anyway
-    Serial.println("OTA update starting -- outputs neutral");
+    Serial.println("OTA update starting -- buttons released");
   });
   ArduinoOTA.onEnd([]() { Serial.println("OTA update done, rebooting"); });
   ArduinoOTA.onError([](ota_error_t e) { Serial.printf("OTA error %u\n", e); });
@@ -355,24 +466,18 @@ void setupOta() {
 }
 
 void setup() {
+  // Buttons released before anything else (NVS, Serial, WiFi). Until this line
+  // the pins float (ROM bootloader, ~0.3 s): the 100 k base pull-downs cover that.
+  configurePins();
   Serial.begin(115200);
   prefs.begin("hive", false);
-  // Sentinel rather than Preferences::isKey(): isKey() is not present in every
-  // arduino-esp32 core this might be built against, and a stored index is never
-  // negative, so -1 unambiguously means "never set".
-  int stored = prefs.getInt("car_index", -1);
-  carIndexWasStored = (stored >= 0 && stored < MAX_CARS);
-  carIndex = carIndexWasStored ? stored : DEFAULT_CAR_INDEX;
-  pinMode(THROTTLE_IN3_PIN, OUTPUT);
-  pinMode(THROTTLE_IN4_PIN, OUTPUT);
-  // ledcSetup returns 0 if the requested freq/resolution pair is unreachable.
-  // Say so loudly at boot: the failure mode is otherwise a silently dead
-  // steering channel that looks like a wiring fault.
-  if (ledcSetup(SERVO_LEDC_CHANNEL, SERVO_LEDC_FREQ_HZ, SERVO_LEDC_BITS) == 0) {
-    Serial.println("FATAL: servo LEDC setup failed -- steering will NOT respond");
+  int defaults[4] = {pins[0], pins[1], pins[2], pins[3]};
+  loadSettings();
+  for (int b = 0; b < 4; b++) {
+    if (pins[b] != defaults[b]) parkPin(defaults[b]);   // stored pins differ
   }
-  ledcAttachPin(STEER_PIN, SERVO_LEDC_CHANNEL);
-  goNeutral();  // hold stopped + wheels straight from boot
+  configurePins();
+  goNeutral();
 
   WiFi.mode(WIFI_STA);
   // Power-save OFF: with it on, the radio naps between router beacons and
@@ -393,12 +498,14 @@ void setup() {
     Serial.printf("    (NOT SET, using default %d. With more than one car, set every "
                   "car explicitly:  index <n>)\n", DEFAULT_CAR_INDEX);
   }
+  printSettings();
   Serial.printf("point run_controller.py at:  --esp <IP above>:8888"
                 "   (fleet: --esp ip0:8888,ip1:8888,...  in car-index order;"
                 " or --esp auto)\n");
   Serial.printf("firmware %s\n", FW_VERSION);
   udp.begin(UDP_PORT);
   setupOta();
+  nextSlotMs = millis();
 }
 
 void loop() {
@@ -442,7 +549,7 @@ void loop() {
           if (!failsafeActive) {
             // Once per stop, not per packet: a disarmed controller sends
             // E-stop at 10 Hz, and 10 lines/s would bury everything else.
-            Serial.printf("#%ld E-STOP -> neutral\n", seq);
+            Serial.printf("#%ld E-STOP -> buttons released\n", seq);
           }
           failsafeActive = true;
           lastPacketMs = millis();
@@ -455,14 +562,13 @@ void loop() {
           if (millis() - lastSlotWarnMs > 2000) {
             lastSlotWarnMs = millis();
             Serial.printf("#%ld NO COMMAND for car index %d (packet carries %d pair(s)) "
-                          "-> neutral. Check --esp order and this car's index.\n",
+                          "-> released. Check --esp order and this car's index.\n",
                           seq, carIndex, (int)doc["cmd"].size());
           }
         } else {
           double thr = mySlot[0] | 0.0;
           double str = mySlot[1] | 0.0;
-          driveMotor(THROTTLE_IN3_PIN, THROTTLE_IN4_PIN, thr, THROTTLE_MAX_DUTY);
-          driveSteer(str);
+          applyCommand(thr, str);
           failsafeActive = false;
           lastPacketMs = millis();
         }
@@ -489,12 +595,19 @@ void loop() {
   if (!failsafeActive && millis() - lastPacketMs > FAILSAFE_TIMEOUT_MS) {
     goNeutral();
     failsafeActive = true;
-    Serial.println("FAILSAFE: command stream stalled -> neutral");
+    Serial.println("FAILSAFE: command stream stalled -> buttons released");
+  }
+
+  if (failsafeActive) {
+    releaseAll();          // nothing pressed while stopped, whatever the axes hold
+    nextSlotMs = millis(); // the first slot after a stop runs at once (and no wrap)
+  } else {
+    serviceSlots();
   }
 
 #ifdef OTA_PASSWORD
   // Only while stopped: an update blocks this loop for seconds, which is
-  // harmless for a car in neutral and unacceptable for one being driven.
+  // harmless for a car with every button released, unacceptable for one driving.
   if (failsafeActive) ArduinoOTA.handle();
 #endif
 }

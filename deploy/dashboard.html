@@ -194,8 +194,14 @@ function drawMap() {
     g.stroke();
   }
   const cars = [];
-  if (v && fresh("vision")) for (const veh of v.vehicles || []) if (veh.x != null)
-    cars.push({ x: veh.x, y: veh.y, h: veh.h, label: veh.role, ev: veh.role === "EVADER", seen: veh.seen });
+  // Role commanders (the hive model) report each pursuer's role: colour by it.
+  const carRoles = (c && fresh("control") && c.roles) || null;
+  if (v && fresh("vision")) for (const veh of v.vehicles || []) if (veh.x != null) {
+    const slot = /^P(\d+)$/.exec(veh.role || "");
+    const role = carRoles && slot ? String(carRoles[+slot[1] - 1] || "").toUpperCase() : "";
+    cars.push({ x: veh.x, y: veh.y, h: veh.h, label: role ? `${veh.role} ${role}` : veh.role,
+                ev: veh.role === "EVADER", seen: veh.seen, color: ROLE_COLORS[role] });
+  }
   if (c && c.poses && c.capture_radius) {
     const [ex, ey] = c.poses.evader;
     g.strokeStyle = "rgba(255,123,114,.6)"; g.setLineDash([5, 5]); g.beginPath();
@@ -204,7 +210,7 @@ function drawMap() {
   for (const car of cars) {
     const L = 0.19 * s * 0.6;
     g.save(); g.translate(X(car.x), Y(car.y)); g.rotate(-car.h);
-    g.fillStyle = car.ev ? "#ff7b72" : "#58a6ff"; g.globalAlpha = car.seen ? 1 : 0.35;
+    g.fillStyle = car.ev ? "#ff7b72" : (car.color || "#58a6ff"); g.globalAlpha = car.seen ? 1 : 0.35;
     g.beginPath(); g.moveTo(L, 0); g.lineTo(-L * 0.7, L * 0.55); g.lineTo(-L * 0.7, -L * 0.55); g.closePath(); g.fill();
     g.restore();
     g.fillStyle = "#d6dde6"; g.font = "13px system-ui"; g.fillText(car.label, X(car.x) + 12, Y(car.y) - 10);
@@ -212,6 +218,9 @@ function drawMap() {
   if (c && c.dist) $("mapsub").textContent = "distance to evader: " + c.dist.map((d) => d.toFixed(2) + " m").join(", ")
     + (c.capture_radius ? ` · dashed ring = the policy's capture radius (${c.capture_radius.toFixed(2)} m)` : "");
 }
+
+// The hive demo's role colours, except CUTOFF: red is the evader here.
+const ROLE_COLORS = { CLOSE: "#3fb950", PRESSURE: "#58a6ff", CUTOFF: "#db61a2", FLANK: "#d29922" };
 
 function drawSpark() {
   const cv = $("spark"), g = cv.getContext("2d"), W = cv.width, H = cv.height;

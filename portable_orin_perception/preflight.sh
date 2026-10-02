@@ -168,9 +168,10 @@ sys.path.insert(0, "ros2_ws/src/hive_perception")
 from hive_perception.core.frame_builder import load_marker_map
 mm = load_marker_map("config/marker_map.yaml")
 n = len(mm.pursuer_ids)
-print(f"  [ OK ]  {n} pursuer(s) tracked: marker ids {mm.pursuer_ids}, evader {mm.evader_id}")
-print(f"          -> launch with expected_pursuers:={n}")
-print(f"          -> the controller model must have num_pursuers = {n}")
+print(f"  [ OK ]  fleet of {n} pursuer tag(s): marker ids {mm.pursuer_ids}, evader {mm.evader_id}")
+print(f"          -> `arena` tracks the first num_pursuers of them (the model's count; see `arena fleet`)")
+print(f"          -> by hand: run_vision.py --pursuers <the model's num_pursuers>;")
+print(f"             the ROS pipeline: expected_pursuers:={n} (it tracks every listed tag)")
 for i, mid in enumerate(mm.pursuer_ids):
     print(f"          -> marker id {mid} = pursuer slot {i} = ESP32 CAR_INDEX {i} "
           f"= --esp address #{i + 1}")

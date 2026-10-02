@@ -1,0 +1,15 @@
+{
+ "scale": 0.305,
+ "source_goldens_replayed_by_new_runtime_max_abs": 0.0,
+ "scaled_vs_source_goldens": {
+  "max_abs": {
+   "obs": 0.0,
+   "role_logits": 0.0,
+   "settings": 0.0,
+   "residual": 0.0,
+   "command": 0.0
+  },
+  "role_mismatches": 0
+ },
+ "golden_ticks": 359
+}

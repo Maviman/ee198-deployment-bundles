@@ -16,7 +16,12 @@ and a side-effect-free reply to discovery probes. Physics is
 SinglePursuerEnv's bicycle model at the 6 ft test-arena scale
 (configs/test_arena_6ft.json), stepped at 100 Hz with a small actuator delay.
 
-    python tools/sim_world.py --cars 1 --world-port 9880
+--buttons mod|binary drives the sim cars the way the V3 firmware drives the
+real ones: through the four on/off buttons of an RC remote (see ButtonAxis).
+The sim's steering is instant, with no servo slew, so treat it as a rough
+preview of button control, not a measurement.
+
+    python tools/sim_world.py --cars 1 --world-port 9880 [--buttons mod]
 """
 
 from __future__ import annotations
@@ -39,6 +44,54 @@ FAILSAFE_S = 0.3
 SEQ_RESYNC_GAP = 50
 
 
+class ButtonAxis:
+    """Mirror of esp32/esp32_receiver/button_mod.h -- KEEP THE TWO IN STEP. Turns
+    a proportional command into on/off presses of two opposite remote buttons,
+    one slot at a time. Returns +1 / -1 (that button down) or 0 (both up)."""
+
+    DEADBAND, FULL_ON, BINARY_THRESHOLD, DIR_GAP_SLOTS, ACC_START = 0.05, 0.97, 1.0 / 3.0, 1, 0.5
+
+    def __init__(self, throttle: bool) -> None:
+        self.throttle = throttle
+        self.reset()
+
+    def reset(self) -> None:
+        self.acc, self.dir, self.gap = self.ACC_START, 0, 0
+
+    @classmethod
+    def direction(cls, cmd: float) -> int:
+        u = 0.0 if cmd != cmd else max(-1.0, min(1.0, cmd))
+        return 0 if abs(u) < cls.DEADBAND else (1 if u > 0 else -1)
+
+    def release_now(self, cmd: float) -> bool:
+        """A stop or a reversal releases at once, not at the next slot."""
+        nd = self.direction(cmd)
+        return nd == 0 or (self.dir != 0 and nd != self.dir)
+
+    def step(self, cmd: float, modulated: bool, limit: float) -> int:
+        u = 0.0 if cmd != cmd else max(-1.0, min(1.0, cmd))
+        want = self.direction(u)
+        m = abs(u) * (limit if self.throttle and modulated else 1.0)   # deadband judged on the raw command
+        if want and self.dir and want != self.dir:       # reversing: release first
+            self.gap, self.acc, self.dir = self.DIR_GAP_SLOTS, self.ACC_START, 0
+        press = False
+        if want == 0:
+            self.acc, self.dir = self.ACC_START, 0
+        elif self.gap > 0:
+            self.gap -= 1
+        elif not modulated:
+            press = m >= self.BINARY_THRESHOLD
+        elif m >= self.FULL_ON:
+            press = True
+        else:
+            self.acc += m
+            if self.acc >= 1.0:
+                press, self.acc = True, self.acc - 1.0
+        if press:
+            self.dir = want
+        return want if press else 0
+
+
 class MockCar:
     def __init__(self, index: int, port: int, bind: str) -> None:
         self.index = index
@@ -54,6 +107,32 @@ class MockCar:
         self.pending: deque = deque()     # (apply_at, cmd) for actuator delay
         self.started = time.monotonic()
         self.packets = 0
+        self.axes = (ButtonAxis(True), ButtonAxis(False))
+        self.pressed = (0.0, 0.0)
+        self.next_slot = 0.0
+
+    def output(self, now: float, buttons: str, slot_s: float, limit: float) -> tuple[float, float]:
+        """What reaches the wheels: the command itself, or (with --buttons) the
+        remote's button state, re-decided every slot like the firmware."""
+        if buttons == "off":
+            return self.cmd
+        if self.failsafe:
+            for a in self.axes:
+                a.reset()
+            self.pressed, self.next_slot = (0.0, 0.0), now
+            return self.pressed
+        # A stop or a reversal releases that axis at once (the firmware does it
+        # when the packet arrives; self.cmd only changes on arrival).
+        self.pressed = tuple(0.0 if a.release_now(c) else p
+                             for a, c, p in zip(self.axes, self.cmd, self.pressed))
+        if now >= self.next_slot:
+            mod = buttons == "mod"
+            self.pressed = (float(self.axes[0].step(self.cmd[0], mod, limit)),
+                            float(self.axes[1].step(self.cmd[1], mod, limit)))
+            self.next_slot += slot_s
+            if self.next_slot - now < slot_s / 2:          # every slot lasts >= half a slot
+                self.next_slot = now + slot_s
+        return self.pressed
 
     def poll(self, now: float, delay_s: float) -> None:
         while True:
@@ -128,8 +207,15 @@ def main() -> None:
     ap.add_argument("--evader-speed", type=float, default=0.35, help="fraction of evader max speed")
     ap.add_argument("--actuator-delay", type=float, default=0.05, help="command -> wheels (s)")
     ap.add_argument("--hz", type=float, default=100.0)
+    ap.add_argument("--buttons", choices=["off", "mod", "binary"], default="off",
+                    help="drive through 4 on/off remote buttons like the V3 firmware (default: proportional)")
+    ap.add_argument("--slot-ms", type=float, default=40.0, help="--buttons mod: modulation slot (firmware default 40)")
+    ap.add_argument("--throttle-limit", type=float, default=0.6,
+                    help="--buttons mod: throttle press-fraction cap (firmware default 0.6)")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
+    if not 15 <= args.slot_ms <= 200 or not 0.1 <= args.throttle_limit <= 1.0:
+        ap.error("--slot-ms must be 15..200 and --throttle-limit 0.1..1 (the firmware's ranges)")
 
     env = SinglePursuerEnv(config=args.config, num_pursuers=args.cars, stage="fleeing_evader",
                            evader_speed_frac=args.evader_speed, seed=args.seed)
@@ -140,7 +226,8 @@ def main() -> None:
     world = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     world_addr = ("127.0.0.1", args.world_port)
     print(f"sim world: {args.cars} car(s) on UDP {[c.port for c in cars]}, arena "
-          f"{2 * env.half_width:.2f} x {2 * env.half_height:.2f} m, world -> :{args.world_port}", flush=True)
+          f"{2 * env.half_width:.2f} x {2 * env.half_height:.2f} m, world -> :{args.world_port}, "
+          f"actuation: {'proportional' if args.buttons == 'off' else 'buttons ' + args.buttons}", flush=True)
 
     period = 1.0 / args.hz
     next_t = time.monotonic()
@@ -159,7 +246,8 @@ def main() -> None:
                 car.poll(now, args.actuator_delay)
             if capture_until is None:
                 for car, p in zip(cars, env.pursuers):
-                    env._drive(p, car.cmd[0], car.cmd[1])
+                    thr, steer = car.output(now, args.buttons, args.slot_ms / 1000.0, args.throttle_limit)
+                    env._drive(p, thr, steer)
                     env._keep_inside(p)
                 env._move_evader()
                 env._resolve_evader_blocking()

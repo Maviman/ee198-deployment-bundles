@@ -97,10 +97,12 @@ def main(argv=None) -> int:
     ap.add_argument("--out-dir", default=str(Path.home() / ".arena" / "scan"))
     ap.add_argument("--residual-warn-m", type=float, default=0.02)
     ap.add_argument("--drift-warn-px", type=float, default=3.0)
+    ap.add_argument("--pursuers", type=int, default=None,
+                    help="how many pursuer cars to look for (the first N of marker_map.yaml); default all")
     args = ap.parse_args(argv)
 
     cfg_dir = ROOT / "config"
-    mm = load_marker_map(cfg_dir / "marker_map.yaml")
+    mm = load_marker_map(cfg_dir / "marker_map.yaml").with_pursuers(args.pursuers)
     cam = load_camera_config(cfg_dir / "camera.yaml").with_overrides(device=args.device)
     arena_cfg = yaml.safe_load((cfg_dir / "arena_test_6ft.yaml").read_text(encoding="utf-8"))
     half = (arena_cfg["arena_width_m"] / 2.0, arena_cfg["arena_height_m"] / 2.0)

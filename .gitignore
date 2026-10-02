@@ -15,3 +15,6 @@ portable_orin_perception/config/arena_homography.yaml
 deploy/arena.local.conf
 portable_orin_perception/config/camera.local.yaml
 arena_scan.png
+
+# Offline Orin install folders + download cache (deploy/offline/build_packages.py)
+dist/

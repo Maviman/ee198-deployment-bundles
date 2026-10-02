@@ -103,7 +103,11 @@ figures live. Record them the first session.
    `arena` uses key-based SSH to each Orin from wherever you run it:
    `ssh-copy-id jordan@<host>` once per machine. To run `arena` on the control
    Orin itself, give it a key to the vision Orin the same way.
-3. **Install** (asks for the sudo password on each Orin): `./arena setup`
+3. **Install** (asks for the sudo password on each Orin): `./arena setup`.
+   **No internet on the Orins?** Use the offline install folders instead:
+   `python deploy/offline/build_packages.py` on a PC that has internet, then
+   follow `START_HERE` in each folder ([deploy/offline/README.md](deploy/offline/README.md)).
+   Re-running an install folder also replaces `./arena sync`.
 4. **Tune** (after every reboot: neither setting persists): `./arena tune`
    pins the CPU clocks (~1.45× faster detection) and turns WiFi power-save
    off (power-save adds 100 ms+ naps to the radio).
@@ -139,6 +143,35 @@ the dashboard raises **"corner tags moved"** if they drift.
 `./arena scan --tune-exposure` finds the shortest exposure that is bright
 enough for the room and saves it (`config/camera.local.yaml`). Shorter exposure
 means less motion blur on a moving tag.
+
+## How many pursuers
+
+`config/marker_map.yaml` lists the whole fleet in slot order: tag 1 = P1 =
+CAR_INDEX 0, tag 2 = P2 = CAR_INDEX 1, tag 3 = P3 = CAR_INDEX 2. How many of
+them drive is the **model's** car count (`num_pursuers` in its manifest).
+`arena up` tells the vision Orin to track only that many and ignore the other
+tags.
+
+```bash
+./arena fleet                                         # count, model, tag -> CAR_INDEX, installed models
+./arena fleet --pursuers 3 --model models/<3-car model>   # from now on (deploy/arena.local.conf)
+./arena fleet --pursuers auto --model models/n1_catch     # back to one car
+./arena up --model models/<name>                      # one session; the count follows the model
+./arena cars                                          # every car answers, with the right CAR_INDEX?
+```
+
+A model's car count is fixed by its training. When the count and the model
+disagree, `arena up` and `arena fleet` refuse before anything starts, and name
+an installed model that fits. If they disagreed at runtime, the controller
+would reject every pose frame and the cars would sit in failsafe.
+
+Two kinds of model run on the same commands, picked by the manifest's
+`runtime` field (`pc_controller/loops.py`):
+
+- **Flat policies** (no `runtime` key; `n1_catch`, `n1_pin`) run through `PortableLoop`.
+- **Role commanders** (`"runtime": "hive_commander_v1"`, the hive model) run
+  through the vendored runtime in `pc_controller/runtimes/`. For these, the
+  dashboard colours each pursuer by its current role.
 
 ## Watching a run
 

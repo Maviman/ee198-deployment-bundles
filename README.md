@@ -55,6 +55,8 @@ the session commands, the dashboard, and what was changed to cut latency.
 | If you want to… | Read |
 |---|---|
 | Run the arena (two Orins, or one), day to day | [ARENA.md](ARENA.md) |
+| Install on Orins that have no internet | [deploy/offline/README.md](deploy/offline/README.md) |
+| Drive 1 car or 3 (`arena fleet`) | [ARENA.md § How many pursuers](ARENA.md#how-many-pursuers) |
 | Bring up one Jetson by hand, step by step | [ORIN_DEPLOYMENT.md](ORIN_DEPLOYMENT.md) |
 | Get the camera calibrated fast | [ORIN_QUICKSTART.md](ORIN_QUICKSTART.md) |
 | Learn the ROS 2 concepts this uses | [ROS2_LEARNING.md](portable_orin_perception/ROS2_LEARNING.md) |

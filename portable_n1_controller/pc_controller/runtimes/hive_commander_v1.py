@@ -139,10 +139,14 @@ def ctrv_predict(pos, yaw, spd, yaw_rate, t: float):
 
 # ---- playbooks (isaac_hive/roles.py) ---------------------------------------------------------------------------
 class Playbook:
-    """roles.settings_to_physical + role_targets + track for one PlaybookCfg (the manifest's "playbook" block)."""
+    """roles.settings_to_physical + role_targets + track for one PlaybookCfg (the manifest's "playbook" block).
 
-    def __init__(self, cfg: dict, setting_ranges: dict):
+    length_scale multiplies the few lengths roles.py hard-codes (1.0 = the training code exactly); a manifest that
+    scales all its lengths and speeds by s sets it to s (a geometrically similar arena, e.g. 6 m -> 1.83 m)."""
+
+    def __init__(self, cfg: dict, setting_ranges: dict, length_scale: float = 1.0):
         self.c = dict(cfg)
+        self.L = float(length_scale)
         self.hw, self.hh = float(cfg["half_extent"][0]), float(cfg["half_extent"][1])
         self.lo = np.array([[setting_ranges[r][k][0] for k in range(2)] for r in ROLE_NAMES], dtype=G)
         self.hi = np.array([[setting_ranges[r][k][1] for k in range(2)] for r in ROLE_NAMES], dtype=G)
@@ -169,7 +173,7 @@ class Playbook:
         c, hw, hh = self.c, self.hw, self.hh
         walls = bool(c["walls_count"])
         u_star, _, ang_star, ang2, _ = lanes(ppos, epos, hw, hh, walls, int(c["num_headings"]),
-                                             c["second_lane_min_deg"])
+                                             c["second_lane_min_deg"], 0.05 * self.L)
         e = epos[:, None, :]
         rel = ppos - e
         d_e = np.linalg.norm(rel, axis=-1)
@@ -179,7 +183,8 @@ class Playbook:
         if evel is not None and c["cutoff_lead_s"] > 0.0:
             e_lead = epos + evel * c["cutoff_lead_s"]
             e_lead = np.stack((np.clip(e_lead[:, 0], -hw, hw), np.clip(e_lead[:, 1], -hh, hh)), axis=-1).astype(G)
-            _, _, ls_star, ls2, _ = lanes(ppos, e_lead, hw, hh, walls, int(c["num_headings"]), c["second_lane_min_deg"])
+            _, _, ls_star, ls2, _ = lanes(ppos, e_lead, hw, hh, walls, int(c["num_headings"]), c["second_lane_min_deg"],
+                                          0.05 * self.L)
         else:
             e_lead, ls_star, ls2 = epos, ang_star, ang2
         lane_ang = np.where(role == FLANK, ls2[:, None], ls_star[:, None]) + np.deg2rad(a1)
@@ -194,7 +199,7 @@ class Playbook:
         n = ppos.shape[1]
         others = (ppos.sum(axis=1, keepdims=True) - ppos) / max(n - 1, 1)
         toward = np.where((nb > 0)[:, None, :], np.broadcast_to(blk_c[:, None, :], ppos.shape), others) - e
-        toward = np.where(np.linalg.norm(toward, axis=-1, keepdims=True) > 1e-3, toward,
+        toward = np.where(np.linalg.norm(toward, axis=-1, keepdims=True) > 1e-3 * self.L, toward,
                           np.broadcast_to(-u_star[:, None, :], toward.shape))
         if n == 1:
             toward = -u_star[:, None, :]
@@ -213,7 +218,7 @@ class Playbook:
         floor = self.contact_floor
         keep = np.where(role == PRESSURE, np.maximum(c["pressure_keepout_frac"] * a2, floor),
                         np.maximum(0.8 * a2, floor))
-        keep = np.where(role == CLOSE, r_c - 0.02, keep).astype(G)
+        keep = np.where(role == CLOSE, r_c - 0.02 * self.L, keep).astype(G)
         cap = np.ones_like(d_e)
         cap = np.where(role == PRESSURE, c["pressure_speed_cap"], cap)
         cap = np.where(role == CLOSE, np.clip(a2, 0.0, 1.0), cap).astype(G)
@@ -232,8 +237,8 @@ class Playbook:
         ab = target - ppos
         t = np.clip(((e - ppos) * ab).sum(-1) / np.maximum((ab * ab).sum(-1), 1e-9), 0.0, 1.0)
         clear = np.linalg.norm(e - (ppos + t[..., None] * ab), axis=-1)
-        route = (clear < keepout) & (d_e > keepout - 0.05)
-        ring = np.maximum(keepout + c["route_clear_m"], np.minimum(d_e, keepout + 0.6))
+        route = (clear < keepout) & (d_e > keepout - 0.05 * self.L)
+        ring = np.maximum(keepout + c["route_clear_m"], np.minimum(d_e, keepout + 0.6 * self.L))
         tgt_rel = target - e
         th_t = np.arctan2(tgt_rel[..., 1], tgt_rel[..., 0])
         delta = wrap_to_pi(th_t - th_p)
@@ -258,7 +263,7 @@ class Playbook:
 
         to_e = wrap_to_pi(th_p + math.pi - pyaw)
         e_ahead = np.abs(to_e) < 0.5 * math.pi
-        room = np.maximum(d_e - c["contact_nose_nose_m"] - 0.02, 0.0)
+        room = np.maximum(d_e - c["contact_nose_nose_m"] - 0.02 * self.L, 0.0)
         e_cap = np.sqrt(2.0 * c["evader_decel_mps2"] * room) / vmax
         if evel is not None:
             u_los = -rel_e / np.maximum(d_e, 1e-6)[..., None]
@@ -277,7 +282,7 @@ class Playbook:
             gap = np.maximum(dist - self.mate_block, 0.0)
             m_cap = np.where(in_cone, np.sqrt(2.0 * c["mate_decel_mps2"] * gap) / vmax, np.inf).min(axis=-1)
             thr = np.where(thr > 0, np.minimum(thr, m_cap), thr)
-            blocked = (in_cone & (dist < self.mate_block + 0.02)).any(axis=-1) & (path > 0.2)
+            blocked = (in_cone & (dist < self.mate_block + 0.02 * self.L)).any(axis=-1) & (path > 0.2 * self.L)
             allp = np.concatenate((ppos, e), axis=1)                             # (B, n+1, 2)
             relb = allp[:, None, :, :] - ppos[:, :, None, :]                     # (B, n, n+1, 2)
             db = np.linalg.norm(relb, axis=-1) + np.concatenate(
@@ -378,7 +383,7 @@ class CommanderRuntime:
         if self.m.get("use_car_cameras"):
             raise ValueError("this runtime is overhead-camera only")
         self.n = int(self.m["num_pursuers"])
-        self.pb = Playbook(self.m["playbook"], self.m["setting_ranges"])
+        self.pb = Playbook(self.m["playbook"], self.m["setting_ranges"], self.m.get("length_scale", 1.0))
         self.residual_scale = float(self.m["residual_scale"])
         if session is None:
             import onnxruntime as ort

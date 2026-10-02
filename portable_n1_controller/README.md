@@ -15,7 +15,7 @@ python selftest.py                  # must print SELFTEST PASSED before anything
 | Path | What it is |
 |---|---|
 | `models/n1_catch/`, `models/n1_pin/` | The two frozen V1 single-pursuer policies as verified ONNX exports (+ manifest + training/eval metrics). |
-| `models/c37_commit3_ft_g997/` | The 3-pursuer hive role commander (manifest `"runtime": "hive_commander_v1"`), run by `pc_controller/runtimes/hive_commander_v1.py`; `golden_vectors.json` pins it in `selftest.py`. Read its README for the transfer gaps. |
+| `models/c37_commit3_ft_g997_arena183/`, `models/c37_commit3_ft_g997/` | The 3-pursuer hive role commander (manifest `"runtime": "hive_commander_v1"`), scaled to the 1.83 m arena and as trained (6 m), run by `pc_controller/runtimes/hive_commander_v1.py`; `golden_vectors.json` pins each in `selftest.py`. Read their READMEs for the transfer gaps. |
 | `pc_controller/loops.py` | Picks the loop a model needs from its manifest: `PortableLoop` for flat policies, `HiveLoop` for role commanders. |
 | `single_pursuer/`, `vehicle_dynamics.py`, `configs/` | Vendored copies of the exact observation/dynamics code the policies were trained against. Used ONLY to build observation vectors — never edit these here. |
 | `controller_runtime/` | Vendored pose ingest, velocity estimation, latency tracking, observation adapter. |

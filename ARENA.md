@@ -158,7 +158,7 @@ the other tags.
 
 ```bash
 ./arena fleet                                         # count, model, tag -> CAR_INDEX, installed models
-./arena fleet --pursuers 3 --model models/c37_commit3_ft_g997   # 3 cars, from now on (arena.local.conf)
+./arena fleet --pursuers 3 --model models/c37_commit3_ft_g997_arena183   # 3 cars, from now on
 ./arena fleet --pursuers 1 --model models/n1_catch        # back to the locked default
 ./arena up --model models/<name>                      # one session; the count follows the model
 ./arena cars                                          # every car answers, with the right CAR_INDEX?
@@ -177,12 +177,19 @@ Two kinds of model run on the same commands, picked by the manifest's
   through the vendored runtime in `pc_controller/runtimes/`. For these, the
   dashboard colours each pursuer by its current role.
 
-`models/c37_commit3_ft_g997` is the hive commander from the AI Training repo
-(three pursuers, one shared network). Its golden vectors replay exactly in
-`selftest.py`. It was trained for a 6 m walled arena, with throttle as a speed
-command, and with no noise or latency, so it runs but chases weakly at 1.83 m.
-In `arena sim` it made 3 captures in 60 s (0 with `--buttons mod`). The retrain
-for the real arena and car is the fix; its model README lists the gaps.
+The hive commander from the AI Training repo (three pursuers, one shared
+network) ships twice. Both replay their golden vectors exactly in `selftest.py`:
+
+| model | what | `arena sim`, captures in 60 s |
+|---|---|---|
+| `models/c37_commit3_ft_g997_arena183` | **use this one**: the same network in a world scaled ×0.305 to the 1.83 m arena, so its role targets stay inside the tape | 11 (4 with `--buttons mod`) |
+| `models/c37_commit3_ft_g997` | as trained: a 6 m walled arena | 3 and 6 in two runs |
+
+These are single short runs, against an easy simulated evader, with instant
+steering (`n1_catch`: 10). The network was trained on a simulated car with
+throttle as a speed command and no noise or latency, and that does not scale.
+Treat 3-car runs as experiments until a retrain on the real car. The model
+READMEs list the gaps.
 
 ## Watching a run
 

@@ -42,6 +42,7 @@ from single_pursuer.env import DT, SinglePursuerEnv
 from controller_runtime.pose_types import VehiclePose
 
 from pc_controller.esp_link import EspLink, discover_cars, parse_targets
+from pc_controller.loops import make_loop
 from pc_controller.portable_loop import PortableLoop
 from pc_controller.pose_stream import UdpPoseSource
 from pc_controller.realtime import run_realtime
@@ -52,7 +53,7 @@ def _world_env_from_metrics(loop: PortableLoop, seed: int) -> SinglePursuerEnv:
     (same auto-fill discipline as playback.py / robustness_eval.py in the repo)."""
     m = loop.policy.metrics
     return SinglePursuerEnv(
-        num_pursuers=int(m.get("num_pursuers", 1)),
+        num_pursuers=loop.policy.num_pursuers,
         capture_mode=m.get("capture_mode", "surround"),
         use_car_cameras=bool(m.get("use_car_cameras", False)),
         evader_speed_frac=float(m.get("evader_speed_frac", 0.0)),
@@ -180,7 +181,7 @@ def main() -> None:
     except (ValueError, AttributeError):
         pass
 
-    loop = PortableLoop(args.model, rate_limit_speed=args.rate_limit_speed)
+    loop = make_loop(args.model, rate_limit_speed=args.rate_limit_speed)
     m = loop.policy.metrics
     print(f"model: {args.model}  (N={loop.policy.num_pursuers}, obs {loop.policy.input_dim}, "
           f"capture_mode={m.get('capture_mode')}, evader_speed={m.get('evader_speed_frac')})")

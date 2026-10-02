@@ -105,6 +105,38 @@ def check_pose_frame_parsing() -> list[str]:
     return failures
 
 
+def check_runtime_models() -> list[str]:
+    """Models whose manifest names a runtime (the hive role commander): the
+    vendored runtime must load them and turn one state into a finite command for
+    every car. Golden-vector replay is added when the first such model ships."""
+    from pc_controller.loops import RUNTIMES, make_loop, read_manifest
+
+    failures = []
+    for d in sorted((ROOT / "models").iterdir()):
+        manifest_path = d / "policy.onnx.manifest.json"
+        if not manifest_path.exists() or not read_manifest(d).get("runtime"):
+            continue
+        runtime = read_manifest(d)["runtime"]
+        if runtime not in RUNTIMES:
+            failures.append(f"{d.name}: runtime {runtime!r} has no vendored implementation")
+            continue
+        try:
+            loop = make_loop(d)
+            n = loop.policy.num_pursuers
+            for k in range(3):
+                t = 0.1 * k
+                action = loop.tick(
+                    pursuer_poses=[VehiclePose(-0.5 + 0.4 * i + 0.02 * k, -0.4, 0.3, t) for i in range(n)],
+                    evader_pose=VehiclePose(0.5, 0.5, 3.0, t))
+            if action.shape != (2 * n,) or not np.all(np.isfinite(action)):
+                failures.append(f"{d.name}: bad command {action!r}")
+            else:
+                print(f"  {d.name}: {runtime}, {n} cars, roles {getattr(loop, 'roles', [])}")
+        except Exception as exc:  # noqa: BLE001 -- report any load/run failure as a selftest failure
+            failures.append(f"{d.name}: {type(exc).__name__}: {exc}")
+    return failures
+
+
 def main() -> None:
     failures: list[str] = []
     print("[1/3] golden-vector parity (obs contract + ONNX models)")
@@ -113,6 +145,8 @@ def main() -> None:
     failures += check_packet_roundtrip()
     print("[3/3] perception pose frame parsing")
     failures += check_pose_frame_parsing()
+    print("[+] models with their own runtime (role commanders)")
+    failures += check_runtime_models()
 
     if failures:
         print("\nSELFTEST FAILED:")

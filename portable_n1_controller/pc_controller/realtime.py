@@ -119,8 +119,7 @@ def run_realtime(loop, link, *, pose_port: int, tick_hz: float = 10.0, stall_s: 
     source = UdpPoseSource(pose_port, expected_pursuers=n)
     tel = Telemetry(telemetry)
     ctl = ControlPort(control_port)
-    env = loop.adapter.env
-    capture_radius = float(getattr(env, "capture_radius", 0.0))
+    capture_radius = float(getattr(loop, "capture_radius", 0.0))
 
     period = 1.0 / tick_hz
     armed = not start_disarmed
@@ -168,6 +167,7 @@ def run_realtime(loop, link, *, pose_port: int, tick_hz: float = 10.0, stall_s: 
                 "pursuers": [[round(p.x, 4), round(p.y, 4), round(p.heading, 4)] for p in last_poses[0]],
                 "evader": [round(last_poses[1].x, 4), round(last_poses[1].y, 4), round(last_poses[1].heading, 4)]},
             "dist": dist, "capture_radius": capture_radius, "cars": cars,
+            "roles": list(getattr(loop, "roles", None) or []) or None,   # role commanders only
         })
 
     def estop(reason: str) -> None:

@@ -24,7 +24,7 @@ finite-differencing downstream and must never be a send/wall time.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Mapping, Sequence
 
@@ -61,6 +61,20 @@ class MarkerMap:
     # detections that are the wrong size to be one of our tags.
     vehicle_tag_m: float = 0.07
     corner_tag_m: float = 0.10
+
+    def with_pursuers(self, n: int | None) -> MarkerMap:
+        """Track only the first ``n`` pursuer tags: CAR_INDEX 0..n-1, the cars a
+        model with num_pursuers = n drives. The remaining pursuer tags stay
+        printable but leave the detector's subset dictionary, exactly as if the
+        YAML listed only ``n``. ``None`` keeps every pursuer the YAML lists."""
+        if n is None or n == len(self.pursuer_ids):
+            return self
+        if not 1 <= n <= len(self.pursuer_ids):
+            raise ValueError(f"{n} pursuer(s) requested, but config/marker_map.yaml lists "
+                             f"{len(self.pursuer_ids)} pursuer tag(s): {self.pursuer_ids}")
+        rest = self.pursuer_ids[n:]
+        return replace(self, pursuer_ids=list(self.pursuer_ids[:n]),
+                       extra_print_ids=sorted(set(self.extra_print_ids or []) | set(rest)))
 
     @property
     def print_ids(self) -> list[int]:

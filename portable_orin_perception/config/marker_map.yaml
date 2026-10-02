@@ -38,20 +38,19 @@
 # ---------------------------------------------------------------------------
 dictionary: DICT_4X4_50
 evader_id: 0
-pursuer_ids: [1]            # N=1 test: only car 1 physically in the arena.
-                            # slot order: pursuers[0] is P1, etc. Restore
-                            # [1, 2, 3] when the other two cars are added.
-                            # This order also defines CAR_INDEX on the ESP32s
-                            # and the --esp address order (see
-                            # portable_n1_controller/README.md).
+# The whole pursuer fleet, in slot order: pursuer_ids[i] is P(i+1), ESP32
+# CAR_INDEX i, and the model's pursuer slot i (see
+# portable_n1_controller/README.md). HOW MANY are tracked is not set here:
+# `arena` passes --pursuers N (the model's num_pursuers, or [fleet] pursuers in
+# deploy/arena.local.conf; see `arena fleet`), and the first N are tracked.
+# The rest stay printable but out of the detector's subset dictionary, exactly
+# as if this list were cut to N. Run by hand without --pursuers, all are tracked.
+pursuer_ids: [1, 2, 3]
 calibration_corner_ids: [10, 11, 12, 13]
 
-# Sheets to PRINT but not yet track. Cars 2 and 3 are coming; printing their
-# tags in the same run means enabling them later is a one-line edit to
-# pursuer_ids above, with no second print run and no risk of a leftover sheet
-# from a different family being printed by mistake. These ids stay out of the
-# detector's subset dictionary until they are moved into pursuer_ids.
-extra_print_ids: [2, 3]
+# Sheets to PRINT but never track (spares). None right now: every printed
+# vehicle sheet is in the fleet above.
+extra_print_ids: []
 
 # Bit errors the detector may correct per tag. Left unset, the code picks a
 # conservative value (2), capped well below what the codeword distance would

@@ -18,10 +18,13 @@ SinglePursuerEnv's bicycle model at the 6 ft test-arena scale
 
 --buttons mod|binary drives the sim cars the way the V3 firmware drives the
 real ones: through the four on/off buttons of an RC remote (see ButtonAxis).
-The sim's steering is instant, with no servo slew, so treat it as a rough
-preview of button control, not a measurement.
+binary (on/off at the 1/3 cut) is what the real car responds to; mod models
+time-modulated presses, which the real car turned out to ignore (measured
+2026-10-02). The sim's steering is instant, with no servo slew, and it has none
+of the real car's lag (~120 ms to start, 0.3-0.5 s to spin down), so treat it as
+a rough preview of button control, not a measurement.
 
-    python tools/sim_world.py --cars 1 --world-port 9880 [--buttons mod]
+    python tools/sim_world.py --cars 1 --world-port 9880 [--buttons binary]
 """
 
 from __future__ import annotations

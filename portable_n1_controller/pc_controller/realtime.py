@@ -114,7 +114,10 @@ class ControlPort:
 def run_realtime(loop, link, *, pose_port: int, tick_hz: float = 10.0, stall_s: float = 0.3,
                  max_pose_age_s: float = 0.15, telemetry: str | None = None,
                  control_port: int | None = None, start_disarmed: bool = False,
-                 model_name: str = "", log=print) -> None:
+                 model_name: str = "", log=print, stop=None) -> None:
+    """Run the loop until Ctrl-C/SIGTERM, or until ``stop`` (an optional threading.Event,
+    for tests and embedders) is set. The pose socket is closed on the way out either way;
+    the caller owns the link."""
     n = loop.policy.num_pursuers
     source = UdpPoseSource(pose_port, expected_pursuers=n)
     tel = Telemetry(telemetry)
@@ -142,10 +145,10 @@ def run_realtime(loop, link, *, pose_port: int, tick_hz: float = 10.0, stall_s: 
     def send_state_telemetry(now: float) -> None:
         cars = []
         if link is not None:
-            for i, (host, port) in enumerate(link.targets):
+            for i in range(len(link.targets)):
                 st = link.car_stats.get(i, {})
                 age = None if st.get("last_ack") is None else round(now - st["last_ack"], 2)
-                cars.append({"idx": i, "addr": f"{host}:{port}", "rtt_ms": st.get("rtt_ms"),
+                cars.append({"idx": i, "addr": link.label(i), "rtt_ms": st.get("rtt_ms"),
                              "rssi": st.get("rssi"), "acks": st.get("acks", 0),
                              "applied": st.get("applied"), "slot": st.get("slot"),
                              "ack_age_s": age})
@@ -176,10 +179,8 @@ def run_realtime(loop, link, *, pose_port: int, tick_hz: float = 10.0, stall_s: 
             link.send_stop()
         estops += 1
 
-    watch = [source.sock] + ([link.sock] if link is not None else []) + (
-        [ctl.sock] if ctl.sock is not None else [])
     try:
-        while True:
+        while stop is None or not stop.is_set():
             now = time.perf_counter()
             for cmd, addr in ctl.poll():
                 if cmd == "arm":
@@ -203,9 +204,12 @@ def run_realtime(loop, link, *, pose_port: int, tick_hz: float = 10.0, stall_s: 
             # Wait on poses, ACKs and operator commands together, so each is
             # handled (and each ACK timestamped) the moment it lands.
             timeout = max(0.005, min(stall_s - (now - last_good), 0.05))
+            # Rebuilt every pass: a serial port that fails and reopens is a new fd.
+            watch = [source.sock] + (link.selectables() if link is not None else []) + (
+                [ctl.sock] if ctl.sock is not None else [])
             ready, _, _ = select.select(watch, [], [], timeout)
-            if link is not None and link.sock in ready:
-                link.poll_acks()
+            if link is not None:
+                link.poll_acks()          # ACKs from every transport; also services serial ports
             if ctl.sock is not None and ctl.sock in ready:
                 continue                  # handled at the top of the loop
             got = source.drain_latest() if source.sock in ready else None

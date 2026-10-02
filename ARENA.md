@@ -122,6 +122,15 @@ figures live. Record them the first session.
    USB flash, and every later firmware update is `./arena flash --ota` (all cars,
    over WiFi, only while they are stopped).
 
+   A car can also be wired to the control Orin by a UART cable instead of joining
+   WiFi: `./arena up --esp serial:/dev/ttyTHS1` (a USB adapter is
+   `serial:/dev/serial/by-id/usb-...`; several cars go in one comma-separated
+   list in CAR_INDEX order, UDP and serial mixed). The commands, the 300 ms
+   failsafe and the dashboard are unchanged; the controller probes each port and
+   refuses to start if the board on it is not the CAR_INDEX its position promises.
+   `./arena cars` and `--esp auto` are UDP discovery and do not list serial cars.
+   See [portable_n1_controller/README.md](portable_n1_controller/README.md#uart-transport-the-car-on-a-cable).
+
 ## Every session
 
 ```bash
@@ -225,7 +234,9 @@ Every hop fails to *stopped*:
    **nothing** (a held pose is never guessed past that).
 2. No usable pose for 0.3 s → the controller E-stops every car. "Usable" now
    also means **fresh**: a pose that took > 150 ms to arrive is never acted on.
-3. No command for 0.3 s → each ESP32 goes neutral on its own.
+3. No command for 0.3 s → each ESP32 goes neutral on its own (over WiFi or a UART cable alike).
+   Neutral means every button released; the V3 car then still runs on for about
+   0.35-0.45 s (measured on blocks, 2026-10-02), so budget that on top of the 0.3 s.
 4. **Disarmed is the default.** `arena up` starts with every car receiving
    E-stop packets (which still get ACKed, so the dashboard shows radio health
    before anything moves). Only `arena go` arms, and only from a shell on the
@@ -240,7 +251,8 @@ Every hop fails to *stopped*:
 
 ```bash
 ./arena sim                    # opens the dashboard; Ctrl-C to stop
-./arena sim --buttons mod      # sim cars driven through on/off remote buttons, like the real V3 cars
+./arena sim --buttons binary   # sim cars driven through on/off remote buttons at the 1/3 cut, like the real V3 car
+                               # (--buttons mod models time-modulated presses, which the real car turned out to ignore)
 ```
 
 Runs everything on this machine through the production code paths. A

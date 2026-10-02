@@ -7,6 +7,10 @@ Works identically against tools/mock_esp.py (no hardware) and the real board.
 
     python tools/link_test.py --esp 127.0.0.1:8888              # vs mock
     python tools/link_test.py --esp 192.168.4.23:8888           # vs real ESP32
+    python tools/link_test.py --esp serial:/dev/ttyTHS1         # ESP32 on a UART cable
+
+Over serial the "rssi" column is absent (there is no radio), and the round trip
+includes the time the bytes spend on the wire (~10 ms for a command at 115200).
 
 FLEET. Pass several addresses in CAR_INDEX order to test the whole fleet at
 once. Every car receives the same joint packet and answers separately, so the
@@ -36,7 +40,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from pc_controller.esp_link import EspLink, parse_targets
+from pc_controller.esp_link import EspLink, parse_targets, target_label, target_uri
+from pc_controller.serial_link import SerialLinkError
 
 RATE_HZ = 10.0  # same 10 Hz cadence the real controller uses
 
@@ -93,12 +98,16 @@ def main() -> None:
     args = parser.parse_args()
 
     targets = parse_targets(args.esp)
-    link = EspLink(targets)
-    n = len(targets)
-    print(f"sending {args.count} packets at {RATE_HZ:.0f} Hz to {n} car(s):")
-    for i, (host, port) in enumerate(targets):
-        print(f"  car index {i} (cmd[{i}]) -> udp://{host}:{port}")
-    print()
+    try:
+        link = EspLink(targets, log=print)
+        n = len(targets)
+        print(f"sending {args.count} packets at {RATE_HZ:.0f} Hz to {n} car(s):")
+        for i, target in enumerate(targets):
+            print(f"  car index {i} (cmd[{i}]) -> {target_uri(target)}")
+        print()
+        link.wait_ready()         # serial boards prove their CAR_INDEX first (no-op for UDP)
+    except SerialLinkError as exc:
+        raise SystemExit(f"serial link: {exc}")
 
     rtts_ms: dict[int, list[float]] = {i: [] for i in range(n)}
     rssis: dict[int, list[int]] = {i: [] for i in range(n)}
@@ -140,7 +149,8 @@ def main() -> None:
                         a = acks[car]
                         mark = "ACK" if a.get("applied") else "old"
                         slot = "" if a.get("slot", True) else "!NOSLOT"
-                        bits.append(f"c{car}:{mark}{slot} {a.get('rssi')}dBm")
+                        sig = f" {a['rssi']}dBm" if a.get("rssi") is not None else ""
+                        bits.append(f"c{car}:{mark}{slot}{sig}")
                     else:
                         bits.append(f"c{car}:LOST")
                 print(f"  #{sent['seq']:4d}  rtt {rtt_ms:6.1f} ms   " + "  ".join(bits))
@@ -149,7 +159,7 @@ def main() -> None:
         link.close()
 
     print("\n===== link test summary =====")
-    verdicts = [summarise(f"car index {i}  ({targets[i][0]}:{targets[i][1]})",
+    verdicts = [summarise(f"car index {i}  ({target_label(targets[i])})",
                           args.count, rtts_ms[i], rssis[i], lost[i], stale[i], slot_bad[i])
                 for i in range(n)]
 

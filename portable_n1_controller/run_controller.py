@@ -30,6 +30,13 @@ Examples (any Python 3.10+ with `pip install -r requirements.txt`):
   # disarmed, report to the hub, take arm/disarm on localhost:9872
   python run_controller.py --model models/n1_catch --source udp --esp auto \
       --telemetry 127.0.0.1:9871 --control-port 9872 --start-disarmed
+  # a car on a UART cable instead of WiFi (needs pyserial): the same packets,
+  # one per line. Position in the list is still the CAR_INDEX, and the board
+  # on each port is probed to check it. Header UART or USB adapter; for USB
+  # prefer the stable names under /dev/serial/by-id/. Mixing with ip:port works.
+  python run_controller.py --model models/n1_catch --source udp --esp serial:/dev/ttyTHS1
+  python run_controller.py --model models/n1_catch --source udp \
+      --esp serial:/dev/serial/by-id/usb-Silicon_Labs_CP2102N-if00-port0@115200
 """
 
 from __future__ import annotations
@@ -41,11 +48,12 @@ import time
 from single_pursuer.env import DT, SinglePursuerEnv
 from controller_runtime.pose_types import VehiclePose
 
-from pc_controller.esp_link import EspLink, discover_cars, parse_targets
+from pc_controller.esp_link import EspLink, discover_cars, parse_targets, target_uri
 from pc_controller.loops import make_loop
 from pc_controller.portable_loop import PortableLoop
 from pc_controller.pose_stream import UdpPoseSource
 from pc_controller.realtime import run_realtime
+from pc_controller.serial_link import SerialLinkError
 
 
 def _world_env_from_metrics(loop: PortableLoop, seed: int) -> SinglePursuerEnv:
@@ -78,6 +86,7 @@ def run_sim(loop: PortableLoop, link: EspLink | None, *, episodes: int, seed: in
             action = loop.tick(pursuer_poses=pursuer_poses, evader_pose=evader_pose)
             if link is not None:
                 link.send_commands(action)
+                link.poll_acks()      # keeps replies (and a serial board's log lines) flowing
             elif steps % 10 == 0:
                 print(f"  ep{episode} step{steps:4d}  cmd throttle={action[0]:+.2f} steer={action[1]:+.2f}")
             _obs, _reward, terminated, truncated, info = env.step(action)
@@ -120,6 +129,7 @@ def run_udp_legacy(loop: PortableLoop, link: EspLink | None, *, pose_port: int) 
             action = loop.tick(pursuer_poses=pursuer_poses, evader_pose=evader_pose)
             if link is not None:
                 link.send_commands(action)
+                link.poll_acks()
             ticks += 1
             if ticks % 50 == 0:
                 print(f"  tick {ticks}  cmd throttle={action[0]:+.2f} steer={action[1]:+.2f}  "
@@ -139,6 +149,10 @@ def main() -> None:
                              "CAR_INDEX order for a fleet "
                              "(ip0:8888,ip1:8888,ip2:8888), or 'auto' to find the cars by "
                              "broadcast (needs exactly car indices 0..N-1 to answer). "
+                             "A car on a UART cable is serial:<device>[@baud], e.g. "
+                             "serial:/dev/ttyTHS1 or serial:/dev/serial/by-id/usb-...; "
+                             "it can sit anywhere in the list (position = CAR_INDEX) and "
+                             "is probed to confirm the board's index. "
                              "Omit to print instead of send.")
     parser.add_argument("--pose-port", type=int, default=9870, help="UDP port for perception frames (--source udp)")
     parser.add_argument("--episodes", type=int, default=3, help="sim episodes to run (--source sim)")
@@ -168,6 +182,9 @@ def main() -> None:
     if args.source == "sim" and (args.start_disarmed or args.control_port):
         parser.error("--start-disarmed/--control-port apply only to --source udp "
                      "(a sim run with --esp drives the cars immediately)")
+    if args.esp and args.esp != "auto" and "auto" in [s.strip() for s in args.esp.split(",")]:
+        parser.error("--esp auto finds every car by broadcast and cannot be combined with "
+                     "other targets: list them all explicitly, in CAR_INDEX order")
 
     # `arena stop` sends SIGTERM. Turn it into the same clean shutdown as
     # Ctrl-C, so the E-stop in link.close() goes out before the process exits.
@@ -219,9 +236,19 @@ def main() -> None:
             print(f"WARNING: model drives {n_pursuers} pursuers but only {len(targets)} "
                   f"car(s) given; slots {list(range(len(targets), n_pursuers))} are "
                   "commanded but unaddressed (nothing listening).")
-        link = EspLink(targets)
-        for i, (host, port) in enumerate(targets):
-            print(f"  car index {i} (cmd[{i}]) -> udp://{host}:{port}")
+        try:
+            link = EspLink(targets, log=lambda m: print(
+                f"[control {time.strftime('%H:%M:%S')}] {m}", flush=True))
+            for i, target in enumerate(targets):
+                print(f"  car index {i} (cmd[{i}]) -> {target_uri(target)}")
+            # Serial boards must prove which CAR_INDEX they are before anything
+            # is driven (no-op for UDP): the wrong port order means the wrong
+            # physical car obeys each command.
+            link.wait_ready()
+        except SerialLinkError as exc:
+            if link is not None:
+                link.close()
+            raise SystemExit(f"serial link: {exc}")
     else:
         print("no --esp given: dry run, commands printed only")
 

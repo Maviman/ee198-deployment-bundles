@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
+#include <initializer_list>
 #include "button_mod.h"
 
 using btnmod::Axis;
@@ -127,6 +128,85 @@ int main() {
     CHECK(btnmod::releaseNow(a, 0.02), "a deadband command must release now");
     CHECK(btnmod::releaseNow(a, -0.5), "a reversal must release now");
     CHECK(!btnmod::releaseNow(a, 0.4), "same direction must not release early");
+  }
+
+  // 12. BINARY gets the same scrutiny as modulated: it is the default for the V3 car, whose
+  //     remote turned out not to feather (measured 2026-10-02).
+  {
+    // 12a. The cut is exactly 1/3, on both axes and both directions. The deadband and
+    //      everything below the cut press nothing.
+    for (bool throttle : {true, false}) {
+      CHECK(duty(1.0 / 3.0, throttle, false, 1.0) == 1.0, "binary 1/3 on throttle=%d must press", throttle);
+      CHECK(duty(-1.0 / 3.0, throttle, false, 1.0, true) == 1.0, "binary -1/3 must press the - button (throttle=%d)", throttle);
+      CHECK(duty(0.3333, throttle, false, 1.0) == 0.0, "binary 0.3333 pressed (throttle=%d)", throttle);
+      CHECK(duty(-0.3333, throttle, false, 1.0, true) == 0.0, "binary -0.3333 pressed (throttle=%d)", throttle);
+      const double dead[] = {0.0, 0.04, 0.05, 0.2};
+      for (double d : dead) {
+        CHECK(duty(d, throttle, false, 1.0) == 0.0 && duty(-d, throttle, false, 1.0, true) == 0.0,
+              "binary %.2f pressed a button (throttle=%d)", d, throttle);
+      }
+    }
+    // 12b. Solid, never pulsed, and the throttle limit does not touch it (it is not a binary setting).
+    CHECK(duty(0.5, true, false, 0.1) == 1.0, "binary throttle 0.5 at limit 0.1 -> %.4f", duty(0.5, true, false, 0.1));
+    CHECK(duty(1.0, true, false, 0.1) == 1.0, "binary throttle 1.0 at limit 0.1 -> %.4f", duty(1.0, true, false, 0.1));
+    CHECK(duty(0.34, true, false, 0.1) == 1.0, "the limit must not scale binary's cut");
+    const double held[] = {0.34, 0.5, 0.97, 1.0};
+    for (double h : held) {
+      for (int sign : {1, -1}) {
+        Axis a(true);
+        a.cmd = sign * h;
+        int up = 0;
+        for (int i = 0; i < 50; i++) {
+          Press p = btnmod::step(a, false, 0.6);
+          if (!(sign > 0 ? p.pos : p.neg)) up++;
+          if (p.pos && p.neg) up += 1000;
+        }
+        CHECK(up == 0, "binary %+.2f released in %d of 50 slots", sign * h, up);
+      }
+    }
+    // 12c. From rest a command presses on the very next slot; it is released by the first slot
+    //      after the command falls below the cut.
+    {
+      Axis a(true);
+      a.cmd = 0.5;
+      Press p = btnmod::step(a, false, 0.6);
+      CHECK(p.pos && !p.neg, "binary 0.5 from rest not pressed on the first slot");
+      a.cmd = 0.2;
+      p = btnmod::step(a, false, 0.6);
+      CHECK(!p.pos && !p.neg, "binary still pressing one slot after the command fell below the cut");
+    }
+    // 12d. A hard reversal: one released slot, then the other way (throttle axis as well as steer).
+    for (bool throttle : {true, false}) {
+      Axis a(throttle);
+      a.cmd = 1.0;
+      for (int i = 0; i < 5; i++) btnmod::step(a, false, 0.6);
+      a.cmd = -1.0;
+      Press p1 = btnmod::step(a, false, 0.6);
+      Press p2 = btnmod::step(a, false, 0.6);
+      CHECK(!p1.pos && !p1.neg, "binary reversal did not release first (throttle=%d)", throttle);
+      CHECK(p2.neg && !p2.pos, "binary reversal did not press the other way after the gap (throttle=%d)", throttle);
+      a.cmd = 0.6;                                  // and back again, through the same gap
+      Press p3 = btnmod::step(a, false, 0.6);
+      Press p4 = btnmod::step(a, false, 0.6);
+      CHECK(!p3.pos && !p3.neg && p4.pos && !p4.neg, "binary reversal back (throttle=%d)", throttle);
+    }
+    // 12e. NaN is released; out-of-range commands clamp and still press; reset releases.
+    {
+      Axis a(false);
+      a.cmd = std::nan("");
+      Press p = btnmod::step(a, false, 1.0);
+      CHECK(!p.pos && !p.neg, "binary NaN pressed a button");
+      a.cmd = 7.0;
+      p = btnmod::step(a, false, 1.0);
+      CHECK(p.pos && !p.neg, "binary 7.0 must clamp to a full press");
+      a.cmd = -7.0;
+      btnmod::step(a, false, 1.0);                  // the gap slot
+      p = btnmod::step(a, false, 1.0);
+      CHECK(p.neg && !p.pos, "binary -7.0 must clamp to a full press the other way");
+      btnmod::reset(a);
+      p = btnmod::step(a, false, 1.0);
+      CHECK(!p.pos && !p.neg, "binary reset left the axis pressing");
+    }
   }
 
   if (failures) {

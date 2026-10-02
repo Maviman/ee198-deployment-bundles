@@ -1,4 +1,4 @@
-"""UDP command link: PC -> one or more ESP32s.
+"""Command link: PC -> one or more ESP32s, over UDP or a serial (UART) line.
 
 Packet format (one JSON object per UDP datagram, newline-terminated):
 
@@ -35,6 +35,15 @@ FAILSAFE_TIMEOUT_MS the ESP goes to neutral on its own -- the PC does not need
 to be trusted to keep the car safe. Note this is PER CAR: with N cars, one can
 fall back to neutral while the others keep driving, and the policy has no
 concept of a stalled teammate. See parse_targets' note on fleet-wide E-stop.
+
+Serial targets
+--------------
+A target written ``serial:/dev/ttyUSB0`` (optionally ``@baud``) is a car on a
+UART cable instead of WiFi. The bytes it receives are the bytes a UDP datagram
+carries (``encode_packet``), one packet per line; see serial_link.py for the
+framing, the CAR_INDEX check done on open, and what happens when the cable
+fails. Serial and UDP targets can be mixed in one list: position is still the
+CAR_INDEX, and one packet and one seq counter still cover the whole fleet.
 """
 
 from __future__ import annotations
@@ -45,6 +54,16 @@ import time
 
 import numpy as np
 
+from pc_controller.serial_link import (
+    SERIAL_PREFIX,
+    VERIFY_TIMEOUT_S,
+    SerialEndpoint,
+    SerialLinkError,
+    SerialTarget,
+    parse_serial_spec,
+    target_label as _serial_label,
+)
+
 DEFAULT_PORT = 8888
 # DSCP "expedited forwarding". WiFi WMM maps it to the voice access category,
 # which waits less for airtime and retries sooner than best-effort traffic
@@ -53,20 +72,73 @@ DEFAULT_PORT = 8888
 DSCP_EF = 0xB8
 
 
+def command_packet(seq: int, actions: np.ndarray, *, estop: bool = False) -> dict:
+    """The command packet for one control tick, exactly as it goes on the wire.
+
+    Shared by every transport (this UDP link, pc_controller/serial_link.py) so
+    the bytes a car receives are identical by construction, whatever the pipe.
+    Actions are clipped to [-1, 1] here -- the same clip the training env
+    applies to incoming actions.
+    """
+    flat = np.clip(np.asarray(actions, dtype=np.float64).ravel(), -1.0, 1.0)
+    if flat.size % 2 != 0:
+        raise ValueError(f"action vector length {flat.size} is not throttle/steer pairs")
+    return {
+        "seq": seq,
+        "t": round(time.time(), 4),
+        "estop": bool(estop),
+        "cmd": [
+            [float(round(flat[i], 4)), float(round(flat[i + 1], 4))]
+            for i in range(0, flat.size, 2)
+        ],
+    }
+
+
+def encode_packet(packet: dict) -> bytes:
+    """A command packet as it goes on the wire: one JSON object and its newline.
+
+    The UDP link sends these bytes as a datagram and the serial link writes them
+    to the port, so a car receives identical bytes whichever way it is wired.
+    """
+    return (json.dumps(packet) + "\n").encode("utf-8")
+
+
+def target_label(target) -> str:
+    """Short name for a target, as shown on the dashboard: 'host:port' for UDP
+    (unchanged), 'serial:/dev/ttyUSB0' for a serial port."""
+    if isinstance(target, SerialTarget):
+        return _serial_label(target)
+    host, port = target
+    return f"{host}:{port}"
+
+
+def target_uri(target) -> str:
+    """Like target_label but with a scheme on UDP targets, for log lines."""
+    return target_label(target) if isinstance(target, SerialTarget) else f"udp://{target_label(target)}"
+
+
 def parse_targets(spec: str, default_port: int = DEFAULT_PORT) -> list[tuple[str, int]]:
-    """'ip', 'ip:port', or a comma-separated list of either -> [(host, port), ...].
+    """'ip', 'ip:port', 'serial:/dev/ttyX[@baud]', or a comma-separated list of
+    those -> [(host, port) | SerialTarget(device, baud), ...].
 
     Order is significant and is the fleet order: the first address is the car
     that drives cmd[0], i.e. the policy's pursuer slot 0. Getting this order
     wrong swaps which physical car obeys which command, so it is validated
     against the policy's pursuer count at start-up rather than discovered on
-    the floor.
+    the floor. (Serial targets are also checked against the CAR_INDEX the board
+    reports; see serial_link.py.)
     """
-    targets: list[tuple[str, int]] = []
+    targets: list = []
     for chunk in str(spec).split(","):
         chunk = chunk.strip()
         if not chunk:
             continue
+        if chunk.lower().startswith(SERIAL_PREFIX):
+            targets.append(parse_serial_spec(chunk))
+            continue
+        if chunk.startswith("/"):
+            raise ValueError(f"{chunk!r} looks like a serial device, not a host: "
+                             f"write it as {SERIAL_PREFIX}{chunk}")
         host, sep, port = chunk.rpartition(":")
         if not sep:                      # bare host, no colon
             host, port = chunk, str(default_port)
@@ -79,37 +151,62 @@ def parse_targets(spec: str, default_port: int = DEFAULT_PORT) -> list[tuple[str
         targets.append((host, port_i))
     if not targets:
         raise ValueError(f"no ESP addresses parsed from {spec!r}")
-    dupes = {t for t in targets if targets.count(t) > 1}
+    udp = [t for t in targets if not isinstance(t, SerialTarget)]
+    dupes = {t for t in udp if udp.count(t) > 1}
     if dupes:
         raise ValueError(
             f"duplicate ESP address(es) {sorted(dupes)} -- two fleet slots pointing at "
             "one car means a car obeys the wrong slot's command")
+    devices = [t.device for t in targets if isinstance(t, SerialTarget)]
+    dupe_devices = sorted({d for d in devices if devices.count(d) > 1})
+    if dupe_devices:
+        raise ValueError(
+            f"duplicate serial device(s) {dupe_devices} -- two fleet slots on one port "
+            "means a car obeys the wrong slot's command")
     return targets
 
 
 class EspLink:
-    def __init__(self, targets, port: int = DEFAULT_PORT) -> None:
-        """``targets``: a single host string, 'ip:port', a comma-separated list,
-        or an explicit list of (host, port) tuples."""
+    def __init__(self, targets, port: int = DEFAULT_PORT, *, log=None) -> None:
+        """``targets``: a single host string, 'ip:port', 'serial:/dev/ttyX', a
+        comma-separated list of those, or an explicit list of (host, port)
+        tuples and SerialTargets.
+
+        ``log`` receives serial link events and the firmware's own log lines
+        from serial boards (a UDP car has no such channel).
+
+        Serial ports are opened here, so a bad path, a busy port or a missing
+        pyserial fails at start-up (SerialLinkError). Call ``wait_ready()``
+        before driving: it returns once every serial board has proved which
+        CAR_INDEX it is."""
         if isinstance(targets, str):
             self.targets = parse_targets(targets, port)
         else:
-            self.targets = [(str(h), int(p)) for h, p in targets]
+            self.targets = [t if isinstance(t, SerialTarget) else (str(t[0]), int(t[1]))
+                            for t in targets]
         # Resolve names ONCE: sendto() with a hostname (e.g. hive-car0.local)
         # would do an mDNS lookup on every 10 Hz packet.
         resolved = []
-        for host, p in self.targets:
+        for t in self.targets:
+            if isinstance(t, SerialTarget):
+                resolved.append(t)
+                continue
+            host, p = t
             try:
                 resolved.append((socket.gethostbyname(host), p))
             except OSError:
                 resolved.append((host, p))       # leave it; the send will fail loudly per packet
         self.targets = resolved
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.sock.setblocking(False)
-        try:
-            self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_TOS, DSCP_EF)
-        except (OSError, AttributeError):
-            pass
+        self._log = log or (lambda _msg: None)
+        self._serial: dict[int, SerialEndpoint] = {}
+        self.sock = None
+        if any(not isinstance(t, SerialTarget) for t in self.targets):
+            self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.sock.setblocking(False)
+            try:
+                self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_TOS, DSCP_EF)
+            except (OSError, AttributeError):
+                pass
         # seq -> perf_counter() at send, for ACK round-trip times (poll_acks).
         self._sent_at: dict[int, float] = {}
         self.car_stats = {i: {"acks": 0, "rtt_ms": None, "rssi": None, "applied": None,
@@ -124,6 +221,14 @@ class EspLink:
         self.seq = 0
         self.packets_sent = 0
         self.datagrams_sent = 0
+        try:
+            for i, t in enumerate(self.targets):
+                if isinstance(t, SerialTarget):
+                    self._serial[i] = SerialEndpoint(t, i, log=self._log)
+                    self._serial[i].open()
+        except BaseException:
+            self._release()
+            raise
 
     @property
     def addr(self) -> tuple[str, int]:
@@ -134,25 +239,94 @@ class EspLink:
     def __len__(self) -> int:
         return len(self.targets)
 
+    # -- per-target helpers ---------------------------------------------------
+    def label(self, i: int) -> str:
+        return target_label(self.targets[i])
+
+    def transport(self, i: int) -> str:
+        return "serial" if isinstance(self.targets[i], SerialTarget) else "udp"
+
+    def link_up(self, i: int) -> bool | None:
+        """Serial: is the port verified and working right now. UDP: None (there
+        is no connection to be up or down; ACK age says whether a car answers)."""
+        ep = self._serial.get(i)
+        return None if ep is None else ep.state == "up"
+
+    @property
+    def serial_endpoints(self) -> dict[int, SerialEndpoint]:
+        return self._serial
+
+    # -- serial transport -----------------------------------------------------
+    def _service(self) -> None:
+        """Reopen failed ports, repeat probes, time out silent boards. Cheap
+        when every port is up; called from the send and ACK paths."""
+        if self._serial:
+            now = time.monotonic()
+            for ep in self._serial.values():
+                ep.service(now)
+
+    def selectables(self) -> list:
+        """Objects for select(): the UDP socket and every open serial port.
+        Ask again each loop pass; a port that fails and reopens is a new object."""
+        out = [] if self.sock is None else [self.sock]
+        for ep in self._serial.values():
+            s = ep.selectable()
+            if s is not None:
+                out.append(s)
+        return out
+
+    def wait_ready(self, timeout_s: float = VERIFY_TIMEOUT_S + 1.0) -> None:
+        """Block until every serial board has answered a probe with the
+        CAR_INDEX it is listed under; raise SerialLinkError, naming the port
+        and what to fix, if one fails or stays silent. No-op for UDP-only fleets."""
+        deadline = time.monotonic() + timeout_s
+        while True:
+            self.poll_acks()                  # services ports, sends probes, reads replies
+            pending = [ep for ep in self._serial.values() if ep.state != "up"]
+            if not pending:
+                return
+            failed = [ep for ep in pending if ep.failures]
+            if failed or time.monotonic() > deadline:
+                raise SerialLinkError("; ".join(
+                    f"{ep.label}: {ep.last_error or 'not verified in time'}"
+                    for ep in (failed or pending)))
+            time.sleep(0.01)
+
+    def _messages(self):
+        """Every reply waiting on any transport, parsed: UDP datagrams, then the
+        complete lines from each serial port. Serial log lines and probe replies
+        are consumed by the endpoint; only ACKs come out."""
+        if self.sock is not None:
+            while True:
+                try:
+                    raw, _addr = self.sock.recvfrom(512)
+                except (BlockingIOError, ConnectionResetError, OSError):
+                    break
+                try:
+                    msg = json.loads(raw.decode("utf-8"))
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    continue
+                if isinstance(msg, dict):
+                    yield msg
+        for ep in list(self._serial.values()):
+            yield from ep.poll()
+
     def _read_acks(self, seq: int, *, expect: int, timeout_s: float) -> dict[int, dict]:
         """Collect ACKs for `seq`, keyed by the reporting car's index."""
         acks: dict[int, dict] = {}
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline and len(acks) < expect:
-            try:
-                raw, _addr = self.sock.recvfrom(512)
-            except (BlockingIOError, ConnectionResetError):
+            self._service()
+            idle = True
+            for ack in self._messages():
+                idle = False
+                if ack.get("ack") != seq:
+                    continue          # an older tick's ACK arriving late
+                # Firmware predating CAR_INDEX omits "car"; treat it as slot 0 so a
+                # mixed fleet during a rolling reflash still reports something.
+                acks[int(ack.get("car", 0))] = ack
+            if idle:
                 time.sleep(0.002)
-                continue
-            try:
-                ack = json.loads(raw.decode("utf-8"))
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                continue
-            if ack.get("ack") != seq:
-                continue          # an older tick's ACK arriving late
-            # Firmware predating CAR_INDEX omits "car"; treat it as slot 0 so a
-            # mixed fleet during a rolling reflash still reports something.
-            acks[int(ack.get("car", 0))] = ack
         return acks
 
     def wait_acks(self, seq: int, *, expect: int | None = None,
@@ -170,18 +344,7 @@ class EspLink:
 
     def build_packet(self, actions: np.ndarray, *, estop: bool = False) -> dict:
         """The exact dict send_commands puts on the wire, without sending it."""
-        flat = np.clip(np.asarray(actions, dtype=np.float64).ravel(), -1.0, 1.0)
-        if flat.size % 2 != 0:
-            raise ValueError(f"action vector length {flat.size} is not throttle/steer pairs")
-        return {
-            "seq": self.seq,
-            "t": round(time.time(), 4),
-            "estop": bool(estop),
-            "cmd": [
-                [float(round(flat[i], 4)), float(round(flat[i + 1], 4))]
-                for i in range(0, flat.size, 2)
-            ],
-        }
+        return command_packet(self.seq, actions, estop=estop)
 
     def send_commands(self, actions: np.ndarray, *, estop: bool = False) -> dict:
         """actions: flat array of 2*N normalized values (throttle, steer per car),
@@ -193,7 +356,7 @@ class EspLink:
         than on commands assembled at slightly different times.
         """
         packet = self.build_packet(actions, estop=estop)
-        payload = (json.dumps(packet) + "\n").encode("utf-8")
+        payload = encode_packet(packet)
         pairs = len(packet["cmd"])
         if pairs < len(self.targets) and not estop:
             # Each ESP goes neutral when its slot is absent, so this is safe --
@@ -207,7 +370,15 @@ class EspLink:
         if len(self._sent_at) > 64:
             for old_seq in sorted(self._sent_at)[:-64]:
                 del self._sent_at[old_seq]
-        for target in self.targets:
+        self._service()
+        for i, target in enumerate(self.targets):
+            if isinstance(target, SerialTarget):
+                # False: the board is not verified yet, or its port just failed.
+                # That car gets nothing this tick and its own dead-man stops it,
+                # exactly as for a UDP car that is off.
+                if self._serial[i].write(payload):
+                    self.datagrams_sent += 1
+                continue
             try:
                 self.sock.sendto(payload, target)
             except OSError:
@@ -220,20 +391,14 @@ class EspLink:
         return packet
 
     def poll_acks(self) -> int:
-        """Drain every ACK waiting on the socket, without blocking, into
+        """Drain every reply waiting on any transport, without blocking, into
         ``car_stats`` (round-trip ms, RSSI, applied). Call once per control
-        tick. Returns how many ACKs were read."""
+        tick; it also services the serial ports (reopen, probes). Returns how
+        many ACKs were read."""
+        self._service()
         now = time.perf_counter()
         n = 0
-        while True:
-            try:
-                raw, _addr = self.sock.recvfrom(512)
-            except (BlockingIOError, ConnectionResetError, OSError):
-                return n
-            try:
-                ack = json.loads(raw.decode("utf-8"))
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                continue
+        for ack in self._messages():
             seq = ack.get("ack")
             car = int(ack.get("car", 0))
             st = self.car_stats.setdefault(car, {"acks": 0})
@@ -245,6 +410,7 @@ class EspLink:
             st["slot"] = ack.get("slot")
             st["last_ack"] = now
             n += 1
+        return n
 
     def send_stop(self) -> dict:
         """Explicit neutral/E-stop packet to EVERY car (also the shutdown message).
@@ -256,11 +422,21 @@ class EspLink:
         """
         return self.send_commands(np.zeros(2 * len(self.targets)), estop=True)
 
+    def _release(self) -> None:
+        """Close everything without a stop packet (start-up failed, nothing was driven)."""
+        if self.sock is not None:
+            self.sock.close()
+        for ep in self._serial.values():
+            ep.close(drain_s=0.0)
+
     def close(self) -> None:
         try:
             self.send_stop()
         finally:
-            self.sock.close()
+            if self.sock is not None:
+                self.sock.close()
+            for ep in self._serial.values():
+                ep.close()        # waits briefly for the final E-stop to leave the wire
 
 
 def _broadcast_addresses() -> list[str]:

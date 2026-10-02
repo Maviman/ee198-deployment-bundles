@@ -1001,7 +1001,8 @@ def main(argv=None) -> None:
 
     p = sub.add_parser("up", help="start vision + controller + dashboard, cars DISARMED")
     p.add_argument("--model", help="override [fleet] model, e.g. models/n1_pin")
-    p.add_argument("--esp", help="override [fleet] esp (auto, or ip:port list)")
+    p.add_argument("--esp", help="override [fleet] esp (auto, or a list in CAR_INDEX order of "
+                                 "ip:port and serial:<device>[@baud] for cars on a UART cable)")
     p.add_argument("--pursuers", help="override [fleet] pursuers for this session (must match the model)")
     p.add_argument("--wait", type=float, default=25.0, help="seconds to wait for a healthy pipeline")
     p.set_defaults(fn=cmd_up)
@@ -1028,7 +1029,8 @@ def main(argv=None) -> None:
     p.add_argument("--monitor", action="store_true", help="also show the terminal monitor here")
     p.add_argument("--buttons", choices=["off", "mod", "binary"], default="off",
                    help="sim cars driven through 4 on/off remote buttons like the real V3 cars "
-                        "(mod = time-modulated presses, binary = on/off at 1/3)")
+                        "(binary = on/off at 1/3, what the real car does; "
+                        "mod = time-modulated presses, which the real car ignores)")
     p.set_defaults(fn=cmd_sim)
 
     args = ap.parse_args(argv)

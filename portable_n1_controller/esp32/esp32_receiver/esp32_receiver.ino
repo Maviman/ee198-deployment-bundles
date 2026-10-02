@@ -2,7 +2,8 @@
  * ESP32 command receiver for the EE198 pursuit car -- V3: it presses the
  * buttons of the car's own RC remote.
  *
- * Listens on UDP port 8888 for JSON command packets from run_controller.py:
+ * Listens on UDP port 8888 -- and on the UART, see UART COMMANDS below -- for
+ * JSON command packets from run_controller.py:
  *   {"seq": 42, "t": 1720300000.123, "estop": false, "cmd": [[0.43, -0.10]]}
  * cmd[i] = [throttle, steer] for the car whose CAR INDEX is i, each normalized
  * to [-1, 1] (+throttle = forward, +steer = left -- the policy's training
@@ -27,6 +28,8 @@
  *
  * SAFETY CONTRACT (do not weaken):
  *  - If no packet arrives for FAILSAFE_TIMEOUT_MS -> every button released.
+ *    One timer serves both transports (UDP and UART); a command that parsed
+ *    refreshes it, nothing else does (not a probe, not noise, not a log line).
  *  - estop:true -> every button released immediately, regardless of cmd.
  *  - Packets with seq <= the last applied seq are dropped (stale/reordered).
  *  - If cmd[] has no entry for THIS car's index -> released and failsafe,
@@ -46,6 +49,29 @@
  *    wifi_credentials.h defines OTA_PASSWORD, and serviced ONLY while the car
  *    is in failsafe. An update can never start on a car that is driving.
  *
+ * UART COMMANDS (the car on a cable instead of WiFi: `run_controller.py --esp
+ * serial:<device>`, see pc_controller/serial_link.py on the PC side):
+ *  - The same command packets, byte for byte, one per line, on the console UART
+ *    (UART0: the USB-UART bridge port, or GPIO43 TX / GPIO44 RX on the header;
+ *    115200 baud). A line starting with '{' is a command frame, anything else
+ *    is a console command; uart_frame.h tells them apart and esp32/test_host
+ *    tests it. Frames go through the SAME handler as UDP packets
+ *    (handlePacket): same parse, same seq rules, same CAR_INDEX slot lookup,
+ *    same failsafe bookkeeping. A frame gets no looser rules than a datagram.
+ *  - Replies come back on the UART, one JSON line each: the ACK, and the reply
+ *    to {"probe":1}. The controller probes first and refuses to command a board
+ *    whose CAR_INDEX is not the one its --esp position promises. "rssi" is
+ *    null: no radio is involved. Log lines (FAILSAFE, E-STOP, ...) share the
+ *    stream and never start with '{'.
+ *  - WiFi is optional: it connects in the background (retried every
+ *    WIFI_RETRY_MS while stopped, until the first connection), so a car with no
+ *    access point in range still boots and takes UART commands from its first
+ *    loop(). UDP and OTA start when WiFi first connects.
+ *  - Do not type console commands while a controller holds the port.
+ *  - Opening the port can reset the board (USB-UART adapters assert DTR/RTS,
+ *    which drive EN and IO0). Buttons come up released and the 100 k pull-downs
+ *    hold them; the controller sends nothing until the probe is answered.
+ *
  * Libraries: ArduinoJson (Benoit Blanchon). Nothing else.
  *
  * HARDWARE -- the ESP32 presses the 4 buttons of the car's handheld remote:
@@ -60,19 +86,25 @@
  *   The remote, not this board, now sets how hard the car drives: its buttons
  *   are on/off. Two ways to turn a proportional command into button presses:
  *
- *   MODULATED (default): each axis presses its button for a FRACTION of the
- *     time equal to |command|, like a person feathering a button. A
- *     first-order sigma-delta decides per SLOT_MS slot whether the button is
- *     down; the remainder carries over, so the average press time tracks the
- *     command exactly. The car's inertia (throttle) and the steering servo's
- *     slew time (steer) smooth the pulses into partial speed and partial
- *     steering angle. This WORKS ONLY IF the remote registers presses as short
- *     as SLOT_MS: a remote that debounces or scans slower than that drops the
- *     short presses. Tune `slot` (below) on the real remote, wheels off.
- *   BINARY: a button is down while |command| >= BINARY_THRESHOLD (1/3, the
- *     same cut the hive training uses for an on/off car), up otherwise.
+ *   BINARY (default): a button is down while |command| >= BINARY_THRESHOLD
+ *     (1/3, the same cut the hive training uses for an on/off car), up
+ *     otherwise. Measured on the V3 car (2026-10-02, wheels on blocks, user
+ *     watching): its remote is effectively on/off per axis, so this is the model
+ *     that matches it. There is NO drive-power cap in this mode: `limit` below
+ *     does not apply, and any throttle >= 1/3 is the car's full speed.
+ *   MODULATED: each axis presses its button for a FRACTION of the time equal to
+ *     |command|, like a person feathering a button. A first-order sigma-delta
+ *     decides per SLOT_MS slot whether the button is down; the remainder carries
+ *     over, so the average press time tracks the command exactly. This only
+ *     gives partial speed or steering if the remote turns short presses into
+ *     partial effect. On the V3 car it does NOT: 50% duty at 40, 80 and 150 ms
+ *     slots spun the wheels at the same speed as a solid hold (measured
+ *     2026-10-02). It stays for a remote that does feather; tune `slot` (below)
+ *     on the real remote, wheels off.
  *
- *   Switch at runtime over serial (saved in NVS): `mode mod` / `mode binary`.
+ *   Switch at runtime over serial: `mode mod` / `mode binary`. The choice is
+ *   SAVED in NVS and survives a reflash, so a board that ever stored one keeps it:
+ *   the default below applies only to a board that never did. Check with `mode`.
  *
  * SERIAL COMMANDS (115200 baud; also listed by typing anything else). Every
  * command that CHANGES something is refused while the car is being driven:
@@ -101,6 +133,7 @@
 #include <ArduinoJson.h>
 #include <Preferences.h>
 #include "button_mod.h"   // command -> button presses (shared with esp32/test_host)
+#include "uart_frame.h"   // UART bytes -> command frames / console lines (shared with esp32/test_host)
 
 // ---- EDIT THESE ------------------------------------------------------------
 // WiFi credentials live in wifi_credentials.h (gitignored, stays local).
@@ -112,7 +145,7 @@
 #include <ArduinoOTA.h>
 #endif
 
-#define FW_VERSION "2026.10-buttons"
+#define FW_VERSION "2026.10-buttons-uart"
 
 const uint16_t UDP_PORT = 8888;
 
@@ -128,11 +161,12 @@ const int DEFAULT_PINS[4] = {1, 2, 42, 41};
 // true: GPIO HIGH presses the button (NPN low-side switch, as on the breadboard).
 const bool BUTTON_ACTIVE_HIGH = true;
 
-// Defaults for the runtime settings (serial `mode`, `slot`, `limit`).
-const bool   DEFAULT_MODULATED = true;
+// Defaults for the runtime settings (serial `mode`, `slot`, `limit`). A value the
+// board has saved in NVS wins over these.
+const bool   DEFAULT_MODULATED = false;  // binary: the V3 car's remote does not feather (see HARDWARE)
 const int    DEFAULT_SLOT_MS   = 40;     // a press this short must still register on the remote
-const double DEFAULT_THROTTLE_LIMIT = 0.6;   // modulated mode: max press fraction for throttle.
-                                              // Deliberately gentle; raise wheels-off.
+const double DEFAULT_THROTTLE_LIMIT = 0.6;   // MODULATED mode only: max press fraction for throttle.
+                                              // Binary presses solid; it has no such cap.
 // Deadband, full-on, binary threshold and the reversing gap: see button_mod.h.
 // ----------------------------------------------------------------------------
 
@@ -160,6 +194,22 @@ const char *PIN_NAMES[4] = {"FWD", "BACK", "LEFT", "RIGHT"};
 btnmod::Axis throttleAxis(true);
 btnmod::Axis steerAxis(false);
 unsigned long nextSlotMs = 0;
+
+// The UART carries command frames and console lines on one wire (uart_frame.h).
+uartframe::LineFramer serialFramer;
+unsigned long lastFrameWarnMs = 0;
+
+// WiFi connects in the background: the UART needs no network (see serviceWifi).
+const unsigned long WIFI_RETRY_MS = 20000;
+bool netStarted = false;       // WiFi connected at least once: UDP socket and OTA are up
+unsigned long lastWifiTryMs = 0;
+
+// Where a reply goes: back to the UDP sender, or out of the UART as one line.
+struct Reply {
+  bool viaSerial;
+  IPAddress ip;
+  uint16_t port;
+};
 
 // ------------------------------------------------------------------ buttons
 void writeButton(int b, bool pressed) {
@@ -380,69 +430,180 @@ void handleConsoleLine(char *line) {
   }
 }
 
-// Serial console, character-at-a-time on purpose. Serial.readStringUntil()
-// BLOCKS for the full serial timeout (1 s by default) whenever a partial line
-// is buffered with no newline yet -- which would stall the UDP poll and trip
-// the car's own failsafe. The control loop has priority; nothing here waits
-// (except `test`, which only runs in failsafe).
-void pollSerialConsole() {
-  static char buf[48];
-  static uint8_t len = 0;
-  static bool overflow = false;
-  while (Serial.available()) {
-    char c = (char)Serial.read();
-    if (c == '\n' || c == '\r') {
-      if (overflow) {
-        Serial.println("REJECTED: line too long, ignored");
-      } else if (len > 0) {
-        buf[len] = '\0';
-        handleConsoleLine(buf);
-      }
-      len = 0;
-      overflow = false;
-    } else if (len < sizeof(buf) - 1) {
-      buf[len++] = c;
-    } else {
-      overflow = true;       // a cut-off command is never executed
-    }
+// ------------------------------------------------------------------ network
+// Where a reply goes. A UDP reply is one datagram (no newline, as ever); a UART
+// reply is one line.
+void sendReply(const Reply &to, const char *msg) {
+  size_t n = strlen(msg);
+  if (to.viaSerial) {
+    Serial.write((const uint8_t*)msg, n);
+    Serial.write('\n');
+  } else {
+    udp.beginPacket(to.ip, to.port);
+    udp.write((const uint8_t*)msg, n);
+    udp.endPacket();
   }
 }
 
-// ------------------------------------------------------------------ network
+// The "rssi" field of a reply is the WiFi signal. Over the UART no radio is in
+// the path, so it is null rather than a number that describes some other link.
+const char *rssiText(const Reply &to, char *buf, size_t size) {
+  if (to.viaSerial) return "null";
+  snprintf(buf, size, "%d", WiFi.RSSI());
+  return buf;
+}
+
 // Discovery / status reply. Pure information: reading it changes nothing.
-void sendInfo(IPAddress ip, uint16_t port) {
-  char buf[320];
+void sendInfo(const Reply &to) {
+  char rssi[8];
+  char buf[360];
   snprintf(buf, sizeof(buf),
            "{\"car\":%d,\"fw\":\"%s\",\"mac\":\"%s\",\"failsafe\":%s,"
-           "\"up_s\":%lu,\"last_seq\":%ld,\"rssi\":%d,\"ota\":%s,"
-           "\"act\":\"buttons4\",\"mode\":\"%s\",\"slot_ms\":%d,\"thr_limit\":%.2f}",
+           "\"up_s\":%lu,\"last_seq\":%ld,\"rssi\":%s,\"ota\":%s,"
+           "\"act\":\"buttons4\",\"mode\":\"%s\",\"slot_ms\":%d,\"thr_limit\":%.2f,"
+           "\"via\":\"%s\"}",
            carIndex, FW_VERSION, WiFi.macAddress().c_str(),
            failsafeActive ? "true" : "false", millis() / 1000UL, lastSeq,
-           WiFi.RSSI(), otaEnabled ? "true" : "false",
-           modulated ? "mod" : "binary", slotMs, throttleLimit);
-  udp.beginPacket(ip, port);
-  udp.write((const uint8_t*)buf, strlen(buf));
-  udp.endPacket();
+           rssiText(to, rssi, sizeof(rssi)), otaEnabled ? "true" : "false",
+           modulated ? "mod" : "binary", slotMs, throttleLimit,
+           to.viaSerial ? "uart" : "udp");
+  sendReply(to, buf);
 }
 
 // {"cfg":{"index":n}}: the serial "index n" command over the network, for
 // fleets where the cars are already sealed up. Refused while driving.
-void handleCfg(JsonVariant cfg, IPAddress ip, uint16_t port) {
+void handleCfg(JsonVariant cfg, const Reply &to) {
   if (!failsafeActive) {
-    const char *msg = "{\"cfg_ok\":false,\"reason\":\"car is being driven; stop it first\"}";
-    udp.beginPacket(ip, port);
-    udp.write((const uint8_t*)msg, strlen(msg));
-    udp.endPacket();
+    sendReply(to, "{\"cfg_ok\":false,\"reason\":\"car is being driven; stop it first\"}");
     return;
   }
   if (!cfg["index"].isNull()) {
     int idx = cfg["index"] | -1;
     if (setCarIndex(idx)) {
-      Serial.printf("car index set to %d over the network (saved) -- now drives cmd[%d]\n",
-                    carIndex, carIndex);
+      Serial.printf("car index set to %d over %s (saved) -- now drives cmd[%d]\n",
+                    carIndex, to.viaSerial ? "the UART" : "the network", carIndex);
     }
   }
-  sendInfo(ip, port);
+  sendInfo(to);
+}
+
+// One command packet, from either transport. The parse, the seq rules, the
+// CAR_INDEX slot lookup, the failsafe bookkeeping and the ACK below are the same
+// code for a UDP datagram and a UART line, so a frame never gets looser rules
+// than a datagram.
+void handlePacket(const char *text, const Reply &from) {
+  StaticJsonDocument<512> doc;
+  // A malformed packet is ignored outright (no ACK, no effect), as before.
+  if (deserializeJson(doc, text) != DeserializationError::Ok) return;
+  // Our own replies are never commands. Without this, a UART wired TX-to-RX by
+  // mistake would feed every ACK back in as a packet with no seq (an e-stop,
+  // below) and ACK that again, at line rate.
+  if (!doc["ack"].isNull() || !doc["fw"].isNull() || !doc["cfg_ok"].isNull()) return;
+  if (!doc["probe"].isNull()) {
+    sendInfo(from);                       // discovery: no effect on outputs
+    return;
+  }
+  if (!doc["cfg"].isNull()) {
+    handleCfg(doc["cfg"], from);
+    return;
+  }
+
+  long seq = doc["seq"] | -1L;
+  bool estop = doc["estop"] | true;  // missing field -> treat as e-stop
+  bool applied = false;
+  // Accept if newer than the last applied seq -- OR resync to a restarted
+  // PC controller (its counter begins at 0 again; without resync the car
+  // ignores every command until power-cycled). Resync is safe whenever the
+  // failsafe is engaged (boot / E-stop / stream stall: no live session to
+  // protect), which every real restart passes through; the gap check covers
+  // a same-instant restart. Small backwards steps while live are still
+  // dropped as genuinely stale/reordered packets.
+  const long SEQ_RESYNC_GAP = 50;  // 5 s of packets -- beyond any real reordering
+  // Does this packet carry a command for THIS car? A shorter cmd[] than our
+  // index means the controller is driving a smaller fleet than we think we
+  // belong to -- a misconfiguration, not a driving decision.
+  JsonVariant mySlot = doc["cmd"][carIndex];
+  bool slotOk = !mySlot.isNull() && mySlot.size() >= 2;
+
+  if (seq > lastSeq || failsafeActive || (lastSeq - seq) > SEQ_RESYNC_GAP) {
+    lastSeq = seq;
+    applied = true;
+    if (estop) {
+      goNeutral();
+      if (!failsafeActive) {
+        // Once per stop, not per packet: a disarmed controller sends
+        // E-stop at 10 Hz, and 10 lines/s would bury everything else.
+        Serial.printf("#%ld E-STOP -> buttons released\n", seq);
+      }
+      failsafeActive = true;
+      lastPacketMs = millis();
+    } else if (!slotOk) {
+      // Deliberately does NOT refresh lastPacketMs: a car with no command
+      // must behave exactly like a car with no link, so the normal failsafe
+      // path owns it rather than a second, subtly different code path.
+      goNeutral();
+      failsafeActive = true;
+      if (millis() - lastSlotWarnMs > 2000) {
+        lastSlotWarnMs = millis();
+        Serial.printf("#%ld NO COMMAND for car index %d (packet carries %d pair(s)) "
+                      "-> released. Check --esp order and this car's index.\n",
+                      seq, carIndex, (int)doc["cmd"].size());
+      }
+    } else {
+      double thr = mySlot[0] | 0.0;
+      double str = mySlot[1] | 0.0;
+      applyCommand(thr, str);
+      failsafeActive = false;
+      lastPacketMs = millis();
+    }
+  }  // else: stale/duplicate packet, not applied (still ACKed below)
+
+  // Delivery confirmation: ACK every parseable packet back to its sender.
+  // "car" is this board's index -- with several cars on one socket it is the
+  // only way the PC can tell whose ACK it just read, and it makes a
+  // duplicate-index mix-up visible from the controller side.
+  // "applied" tells the PC whether it drove the outputs or was dropped as
+  // stale; "slot" reports whether the packet actually addressed this car;
+  // "rssi" (dBm) maps WiFi quality around the arena for free (null over the UART).
+  char rssi[8];
+  char ackBuf[128];
+  snprintf(ackBuf, sizeof(ackBuf),
+           "{\"ack\":%ld,\"car\":%d,\"applied\":%s,\"slot\":%s,\"rssi\":%s}",
+           seq, carIndex, applied ? "true" : "false",
+           slotOk ? "true" : "false", rssiText(from, rssi, sizeof(rssi)));
+  sendReply(from, ackBuf);
+}
+
+// The UART: command frames and console lines, character-at-a-time on purpose.
+// Serial.readStringUntil() BLOCKS for the full serial timeout (1 s by default)
+// whenever a partial line is buffered with no newline yet -- which would stall
+// the loop and trip the car's own failsafe. The control loop has priority;
+// nothing here waits (except `test`, which only runs in failsafe).
+void pollSerial() {
+  while (Serial.available()) {
+    switch (serialFramer.push((char)Serial.read())) {
+      case uartframe::FRAME:
+        handlePacket(serialFramer.line(), Reply{true, IPAddress(), 0});
+        break;
+      case uartframe::CONSOLE:
+        handleConsoleLine(serialFramer.line());
+        break;
+      case uartframe::CONSOLE_TOO_LONG:
+        Serial.println("REJECTED: line too long, ignored");   // a cut-off command is never executed
+        break;
+      case uartframe::FRAME_TOO_LONG:
+        // Not one of ours (a command packet is ~250 bytes at most). Dropped; said
+        // so now and then, so an oversized sender is findable.
+        if (millis() - lastFrameWarnMs > 2000) {
+          lastFrameWarnMs = millis();
+          Serial.printf("REJECTED: frame longer than %u bytes, ignored\n",
+                        (unsigned)uartframe::MAX_LINE);
+        }
+        break;
+      default:
+        break;
+    }
+  }
 }
 
 void setupOta() {
@@ -465,10 +626,43 @@ void setupOta() {
 #endif
 }
 
+// WiFi came up for the first time: start the UDP socket and OTA, and say where
+// to point the controller.
+void startNetwork() {
+  netStarted = true;
+  Serial.printf("IP: %s  listening on UDP %u\n", WiFi.localIP().toString().c_str(), UDP_PORT);
+  Serial.printf("point run_controller.py at:  --esp <IP above>:8888"
+                "   (fleet: --esp ip0:8888,ip1:8888,...  in car-index order;"
+                " or --esp auto)\n");
+  udp.begin(UDP_PORT);
+  setupOta();
+}
+
+// WiFi never blocks the sketch: the UART works from the first loop(), and a car
+// with no access point in range simply has no UDP. Until the first connection
+// the attempt is repeated every WIFI_RETRY_MS, but only while stopped (never
+// start radio work with a button held down). After that, reconnecting is left
+// to the WiFi stack, as it always was.
+void serviceWifi() {
+  if (WiFi.status() == WL_CONNECTED) {
+    if (!netStarted) startNetwork();
+    return;
+  }
+  if (!netStarted && failsafeActive && millis() - lastWifiTryMs >= WIFI_RETRY_MS) {
+    lastWifiTryMs = millis();
+    WiFi.begin(WIFI_SSID, WIFI_PASS);
+  }
+}
+
 void setup() {
   // Buttons released before anything else (NVS, Serial, WiFi). Until this line
   // the pins float (ROM bootloader, ~0.3 s): the 100 k base pull-downs cover that.
   configurePins();
+  // Room for two command frames of the largest fleet (about 250 bytes each; the
+  // default 256 holds one), so a stalled loop -- the blocking `test`, an OTA, a
+  // settings save -- does not eat a frame that was already arriving. Must be set
+  // before begin().
+  Serial.setRxBufferSize(512);
   Serial.begin(115200);
   prefs.begin("hive", false);
   int defaults[4] = {pins[0], pins[1], pins[2], pins[3]};
@@ -486,9 +680,9 @@ void setup() {
   // control loop can't afford the naps.
   WiFi.setSleep(false);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
-  Serial.print("connecting to WiFi");
-  while (WiFi.status() != WL_CONNECTED) { delay(250); Serial.print("."); }
-  Serial.printf("\nIP: %s  listening on UDP %u\n", WiFi.localIP().toString().c_str(), UDP_PORT);
+  lastWifiTryMs = millis();
+  // Not waited for: the UART needs no network (see serviceWifi).
+  Serial.println("connecting to WiFi in the background (UART commands need no network)");
   // Loud, unmissable: an index mix-up between two cars is otherwise only
   // visible as "the wrong car moved", which is slow to diagnose on the floor.
   Serial.printf("=== CAR INDEX %d -- this car obeys cmd[%d] ===\n", carIndex, carIndex);
@@ -499,96 +693,22 @@ void setup() {
                   "car explicitly:  index <n>)\n", DEFAULT_CAR_INDEX);
   }
   printSettings();
-  Serial.printf("point run_controller.py at:  --esp <IP above>:8888"
-                "   (fleet: --esp ip0:8888,ip1:8888,...  in car-index order;"
-                " or --esp auto)\n");
+  Serial.println("UART: command frames (one JSON object per line) are accepted on this port "
+                 "at 115200 baud:  run_controller.py --esp serial:<device>");
   Serial.printf("firmware %s\n", FW_VERSION);
-  udp.begin(UDP_PORT);
-  setupOta();
   nextSlotMs = millis();
 }
 
 void loop() {
-  pollSerialConsole();
+  pollSerial();            // the UART: console lines and command frames
+  serviceWifi();           // UDP and OTA come up when WiFi first connects
 
-  int len = udp.parsePacket();
-  if (len > 0) {
-    int n = udp.read(packetBuf, sizeof(packetBuf) - 1);
-    packetBuf[max(n, 0)] = '\0';
-
-    StaticJsonDocument<512> doc;
-    // A malformed packet is ignored outright (no ACK, no effect), as before.
-    bool parsed = deserializeJson(doc, packetBuf) == DeserializationError::Ok;
-    if (parsed && !doc["probe"].isNull()) {
-      sendInfo(udp.remoteIP(), udp.remotePort());     // discovery: no effect on outputs
-    } else if (parsed && !doc["cfg"].isNull()) {
-      handleCfg(doc["cfg"], udp.remoteIP(), udp.remotePort());
-    } else if (parsed) {
-      long seq = doc["seq"] | -1L;
-      bool estop = doc["estop"] | true;  // missing field -> treat as e-stop
-      bool applied = false;
-      // Accept if newer than the last applied seq -- OR resync to a restarted
-      // PC controller (its counter begins at 0 again; without resync the car
-      // ignores every command until power-cycled). Resync is safe whenever the
-      // failsafe is engaged (boot / E-stop / stream stall: no live session to
-      // protect), which every real restart passes through; the gap check covers
-      // a same-instant restart. Small backwards steps while live are still
-      // dropped as genuinely stale/reordered packets.
-      const long SEQ_RESYNC_GAP = 50;  // 5 s of packets -- beyond any real reordering
-      // Does this packet carry a command for THIS car? A shorter cmd[] than our
-      // index means the controller is driving a smaller fleet than we think we
-      // belong to -- a misconfiguration, not a driving decision.
-      JsonVariant mySlot = doc["cmd"][carIndex];
-      bool slotOk = !mySlot.isNull() && mySlot.size() >= 2;
-
-      if (seq > lastSeq || failsafeActive || (lastSeq - seq) > SEQ_RESYNC_GAP) {
-        lastSeq = seq;
-        applied = true;
-        if (estop) {
-          goNeutral();
-          if (!failsafeActive) {
-            // Once per stop, not per packet: a disarmed controller sends
-            // E-stop at 10 Hz, and 10 lines/s would bury everything else.
-            Serial.printf("#%ld E-STOP -> buttons released\n", seq);
-          }
-          failsafeActive = true;
-          lastPacketMs = millis();
-        } else if (!slotOk) {
-          // Deliberately does NOT refresh lastPacketMs: a car with no command
-          // must behave exactly like a car with no link, so the normal failsafe
-          // path owns it rather than a second, subtly different code path.
-          goNeutral();
-          failsafeActive = true;
-          if (millis() - lastSlotWarnMs > 2000) {
-            lastSlotWarnMs = millis();
-            Serial.printf("#%ld NO COMMAND for car index %d (packet carries %d pair(s)) "
-                          "-> released. Check --esp order and this car's index.\n",
-                          seq, carIndex, (int)doc["cmd"].size());
-          }
-        } else {
-          double thr = mySlot[0] | 0.0;
-          double str = mySlot[1] | 0.0;
-          applyCommand(thr, str);
-          failsafeActive = false;
-          lastPacketMs = millis();
-        }
-      }  // else: stale/duplicate packet, not applied (still ACKed below)
-
-      // Delivery confirmation: ACK every parseable packet back to its sender.
-      // "car" is this board's index -- with several cars on one socket it is the
-      // only way the PC can tell whose ACK it just read, and it makes a
-      // duplicate-index mix-up visible from the controller side.
-      // "applied" tells the PC whether it drove the outputs or was dropped as
-      // stale; "slot" reports whether the packet actually addressed this car;
-      // "rssi" (dBm) maps WiFi quality around the arena for free.
-      char ackBuf[128];
-      snprintf(ackBuf, sizeof(ackBuf),
-               "{\"ack\":%ld,\"car\":%d,\"applied\":%s,\"slot\":%s,\"rssi\":%d}",
-               seq, carIndex, applied ? "true" : "false",
-               slotOk ? "true" : "false", WiFi.RSSI());
-      udp.beginPacket(udp.remoteIP(), udp.remotePort());
-      udp.write((const uint8_t*)ackBuf, strlen(ackBuf));
-      udp.endPacket();
+  if (netStarted) {
+    int len = udp.parsePacket();
+    if (len > 0) {
+      int n = udp.read(packetBuf, sizeof(packetBuf) - 1);
+      packetBuf[max(n, 0)] = '\0';
+      handlePacket(packetBuf, Reply{false, udp.remoteIP(), udp.remotePort()});
     }
   }
 
@@ -608,6 +728,6 @@ void loop() {
 #ifdef OTA_PASSWORD
   // Only while stopped: an update blocks this loop for seconds, which is
   // harmless for a car with every button released, unacceptable for one driving.
-  if (failsafeActive) ArduinoOTA.handle();
+  if (otaEnabled && failsafeActive) ArduinoOTA.handle();
 #endif
 }

@@ -18,7 +18,7 @@ This repo is what actually runs on the hardware — no training repo, no PyTorch
                                         │ 4 transistors
                                         ▼
                        the car's RC remote: FWD / BACK / LEFT / RIGHT
-                       (on/off buttons, pressed modulated or binary)
+                       (on/off buttons, pressed on/off at a 1/3 cut)
 ```
 
 A camera finds each car, the policy decides where to go, and the ESP32 on each

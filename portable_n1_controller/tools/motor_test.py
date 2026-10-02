@@ -12,21 +12,27 @@ one thing this tool exists to isolate.
 
     python tools/motor_test.py --esp 192.168.1.194:8888
     python tools/motor_test.py --esp 192.168.1.194:8888 --throttle 0.5 --hold 2.0
+    python tools/motor_test.py --esp serial:/dev/ttyUSB0        # ESP32 on a UART cable (prefer /dev/serial/by-id/...)
 
 What to watch for, since neither sign convention is knowable from software:
 
 - "forward" really drives forward and "steer left" really goes left. If a
   button is wrong, fix the order on the car's serial console with
   `pins <fwd> <back> <left> <right>` (its `test` command shows which is which).
-- In the firmware's modulated mode, a small throttle should give a slower
-  wheel than a big one. If every throttle looks the same (or nothing moves at
-  small values), the remote is missing the short presses: raise `slot`.
-- In binary mode, a command below 1/3 presses nothing: use --throttle 0.5.
+- The firmware's default is binary mode: a command >= 1/3 presses solid and
+  anything below presses nothing. That is what the V3 car does (its remote does
+  not feather), so the default --throttle is 0.5, just above the cut. A smaller
+  one moves nothing, which looks exactly like a broken wire and is not.
+- In the firmware's modulated mode (`mode mod`), a small throttle should give a
+  slower wheel than a big one. On the V3 car every throttle looks the same
+  (measured 2026-10-02); on a remote that does feather, if nothing moves at
+  small values it is missing the short presses: raise `slot`.
 - Every "neutral" step releases every button.
 
-SAFETY: wheels OFF the ground for this. Default throttle magnitude is a
-gentle 0.3 (normalized) -- raise with --throttle only once 0.3 is confirmed
-safe. Ctrl-C at any time sends an explicit E-stop before exiting.
+SAFETY: wheels OFF the ground for this. In binary mode there is no gentle
+setting: any throttle >= 1/3, the default 0.5 included, is the car's full speed,
+and after a release the car still runs on for about 0.3-0.5 s (measured on
+blocks). Ctrl-C at any time sends an explicit E-stop before exiting.
 """
 
 from __future__ import annotations
@@ -40,7 +46,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from pc_controller.esp_link import EspLink
+from pc_controller.esp_link import EspLink, parse_targets, target_uri
+from pc_controller.serial_link import SerialLinkError
 
 RATE_HZ = 10.0
 
@@ -67,9 +74,11 @@ def run_step(link: EspLink, label: str, throttle: float, steer: float,
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__,
                                       formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--esp", required=True, help="ESP address as ip:port")
-    parser.add_argument("--throttle", type=float, default=0.3,
-                        help="normalized throttle magnitude to test, [-1, 1] (default 0.3, gentle)")
+    parser.add_argument("--esp", required=True,
+                        help="ESP address as ip:port, or serial:<device>[@baud] for a UART cable")
+    parser.add_argument("--throttle", type=float, default=0.5,
+                        help="normalized throttle magnitude to test, [-1, 1] (default 0.5: just above "
+                             "binary mode's 1/3 cut, below which nothing is pressed)")
     parser.add_argument("--steer", type=float, default=0.5,
                         help="normalized steer magnitude to test, [-1, 1] (default 0.5)")
     parser.add_argument("--hold", type=float, default=1.5, help="seconds to hold each step")
@@ -77,9 +86,15 @@ def main() -> None:
     parser.add_argument("--ack-timeout", type=float, default=0.2)
     args = parser.parse_args()
 
-    host, _, port = args.esp.partition(":")
-    link = EspLink(host, int(port or 8888))
-    print(f"motor test vs udp://{link.addr[0]}:{link.addr[1]} -- WHEELS SHOULD BE OFF THE GROUND\n")
+    targets = parse_targets(args.esp)
+    if len(targets) != 1:
+        parser.error("motor_test drives one car: give a single --esp address")
+    try:
+        link = EspLink(targets, log=print)
+        link.wait_ready()         # a serial board proves its CAR_INDEX first (no-op for UDP)
+    except SerialLinkError as exc:
+        raise SystemExit(f"serial link: {exc}")
+    print(f"motor test vs {target_uri(link.addr)} -- WHEELS SHOULD BE OFF THE GROUND\n")
 
     steps = [
         ("neutral (settle/arm)", 0.0, 0.0, args.settle),

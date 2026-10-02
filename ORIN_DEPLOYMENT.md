@@ -91,6 +91,23 @@ bytes). Watch: poses in → commands out at ~10 Hz in mock_esp, then during the
 stall an E-stop within 0.3 s, then re-arm on resume. This is the same
 acceptance behavior as bring-up rung 6, moved onto the Orin.
 
+**The same rehearsal over the UART transport** (the car on a cable instead of
+WiFi). Only T1 and T2 change; the mock makes a pseudo-terminal, and T2 opens it
+the way it will open `/dev/ttyTHS1`. pyserial must be in the controller venv
+(`pip install -r requirements.txt` has it):
+
+```bash
+python3 tools/mock_esp.py --serial --link /tmp/mock-esp0                   # T1
+~/.venvs/n1ctl/bin/python run_controller.py --model models/n1_catch \
+    --source udp --pose-port 9870 --esp serial:/tmp/mock-esp0              # T2
+python3 ../portable_orin_perception/tools/fake_perception.py \
+    --duration 6 --stall 1.2 --resume 3                                    # T3 (unchanged)
+```
+
+T2 first prints `link up, board reports fw mock` (the board answered its probe
+with the CAR_INDEX the `--esp` position promises); then the same behavior as
+above, and the mock's E-stop log lines show up in T2 as `car 0 (serial:...)`.
+
 ## Phase 2 — ROS 2 install
 
 ```bash

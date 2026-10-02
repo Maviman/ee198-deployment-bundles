@@ -309,7 +309,7 @@ def ai_guide() -> Guide:
                              ("arena sim", "1 car (n1_catch): simulated arena + car; dashboard at "
                                            "http://localhost:8080; Ctrl-C to stop"),
                              (f"arena sim --model {N3_MODEL}", "3 cars: the hive commander"),
-                             ("arena sim --buttons mod", "add this to either line: the sim cars are driven "
+                             ("arena sim --buttons binary", "add this to either line: the sim cars are driven "
                                                          "through on/off remote buttons, like the real cars"),
                          ]),
                      ]),

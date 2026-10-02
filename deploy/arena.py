@@ -285,8 +285,9 @@ def resolve_fleet(cfg: Config, model: str, pursuers=None) -> int:
         fits = [m for m, k in installed_models() if k == want]
         die(f"{model} drives {n} car(s), but the fleet is set to {want}. A model's car count is "
             "fixed by its training.\n  "
-            + (f"Models for {want} car(s): {', '.join(fits)}   ->  arena fleet --model {fits[0]}"
-               if fits else f"No installed model drives {want} car(s): add one, or  arena fleet --pursuers {n}"))
+            + (f"Keep {want} car(s): arena fleet --model {fits[0]}   (installed: {', '.join(fits)})\n  "
+               if fits else f"No installed model drives {want} car(s).\n  ")
+            + f"Switch to {n} car(s): arena fleet --pursuers {n} --model {model}")
     tags = fleet_tags()
     if tags and n > len(tags):
         die(f"{model} drives {n} cars, but config/marker_map.yaml lists only {len(tags)} pursuer tag(s) "

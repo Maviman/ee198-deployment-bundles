@@ -405,21 +405,16 @@ ee_choose_default_model() {  # offer to make a just-installed model the one `are
     [ "${#NEW_MODELS[@]}" -gt 0 ] || return 0
     local m
     for m in "${NEW_MODELS[@]}"; do
-        if ask "Make models/$m the model \`arena up\` drives with?" N; then
-            python3 - "$REPO/deploy/arena.local.conf" "models/$m" <<'PY'
-import configparser, sys
-path, model = sys.argv[1], sys.argv[2]
-cp = configparser.ConfigParser()
-cp.read(path, encoding="utf-8")
-if not cp.has_section("fleet"):
-    cp.add_section("fleet")
-cp["fleet"]["model"] = model
-with open(path, "w", encoding="utf-8") as fh:
-    fh.write("# Site overrides for deploy/arena.conf (gitignored). Written by `arena init`.\n")
-    cp.write(fh)
-PY
-            ok "default model is now models/$m (deploy/arena.local.conf, [fleet] model)"
-            result ok "default model models/$m"
+        if ask "Make models/$m the model \`arena up\` drives with? (the default stays n1_catch)" N; then
+            # `arena fleet` checks and saves it, with the car count following the
+            # model (the shipped config pins 1 car, for n1_catch).
+            if (cd "$REPO" && python3 deploy/arena.py fleet --pursuers auto --model "models/$m" >/dev/null); then
+                ok "default model is now models/$m (back: arena fleet --pursuers 1 --model models/n1_catch)"
+                result ok "default model models/$m"
+            else
+                bad "arena fleet refused models/$m"
+                result FAIL "default model models/$m"
+            fi
             return 0
         fi
     done

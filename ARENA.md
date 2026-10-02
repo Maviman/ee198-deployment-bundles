@@ -146,16 +146,20 @@ means less motion blur on a moving tag.
 
 ## How many pursuers
 
+**The deployed model is `n1_catch`, one pursuer** (locked in
+`deploy/arena.conf`: `model = models/n1_catch`, `pursuers = 1`). The arena
+runs it unless you deliberately switch.
+
 `config/marker_map.yaml` lists the whole fleet in slot order: tag 1 = P1 =
 CAR_INDEX 0, tag 2 = P2 = CAR_INDEX 1, tag 3 = P3 = CAR_INDEX 2. How many of
-them drive is the **model's** car count (`num_pursuers` in its manifest).
-`arena up` tells the vision Orin to track only that many and ignore the other
-tags.
+them drive must equal the **model's** car count (`num_pursuers` in its
+manifest). `arena up` tells the vision Orin to track only that many and ignore
+the other tags.
 
 ```bash
 ./arena fleet                                         # count, model, tag -> CAR_INDEX, installed models
 ./arena fleet --pursuers 3 --model models/c37_commit3_ft_g997   # 3 cars, from now on (arena.local.conf)
-./arena fleet --pursuers auto --model models/n1_catch     # back to one car
+./arena fleet --pursuers 1 --model models/n1_catch        # back to the locked default
 ./arena up --model models/<name>                      # one session; the count follows the model
 ./arena cars                                          # every car answers, with the right CAR_INDEX?
 ```

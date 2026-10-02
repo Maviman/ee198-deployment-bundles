@@ -159,7 +159,9 @@ def _manual_cards(vision_machine: str, ai_machine: str, pose_to: str, preview_fr
 
 def _fleet_section(machine: str = "AI ORIN") -> Section:
     return Section("How many pursuers (1 car or 3)", [
-        Para("Each pursuer has a roof tag and a CAR_INDEX (set once per car): "
+        Para("<b>The deployed model is <code>n1_catch</code>, one car.</b> It stays that way until "
+             "you switch on purpose with the commands below. "
+             "Each pursuer has a roof tag and a CAR_INDEX (set once per car): "
              "<b>P1 = tag 1 = CAR_INDEX 0</b>, <b>P2 = tag 2 = CAR_INDEX 1</b>, "
              "<b>P3 = tag 3 = CAR_INDEX 2</b>. The model decides how many cars it can drive "
              "(the <code>n1_*</code> models drive 1). The vision Orin tracks only that many; "
@@ -168,7 +170,7 @@ def _fleet_section(machine: str = "AI ORIN") -> Section:
             ("arena fleet", "show: number of pursuers, model, and P1/P2/P3 -> tag -> CAR_INDEX"),
             ("arena fleet --pursuers 3 --model models/c37_commit3_ft_g997",
              "drive 3 cars with the hive model from now on"),
-            ("arena fleet --pursuers auto --model models/n1_catch", "back to 1 car"),
+            ("arena fleet --pursuers 1 --model models/n1_catch", "back to 1 car (the locked default)"),
             ("arena up --model models/<name>", "one session only: the car count follows the model"),
             ("arena cars", "check every car answers, with CAR_INDEX 0, 1, 2"),
             ("arena cars --index <car-ip> 2", "give a car its CAR_INDEX (only while it is stopped)"),

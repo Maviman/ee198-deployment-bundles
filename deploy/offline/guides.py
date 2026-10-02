@@ -84,7 +84,9 @@ def _models_section(folder: str, script: str) -> Section:
         Para(f"A model is a folder with three files: <code>policy.onnx</code>, "
              f"<code>policy.onnx.manifest.json</code> and <code>metrics.json</code>. "
              f"The AI Orin keeps them in:<br><code>{MODELS}/&lt;name&gt;/</code><br>"
-             f"Two ship with the code: <code>n1_catch</code> (the default) and <code>n1_pin</code>."),
+             f"Three ship with the code: <code>n1_catch</code> (1 car, the default), <code>n1_pin</code> "
+             f"(1 car) and <code>c37_commit3_ft_g997</code> (the 3-car hive commander; trained for a 6 m "
+             f"walled arena, so expect weak chasing at 1.83 m until it is retrained)."),
         Steps([
             f"<b>Easiest:</b> put your model folder inside <b>{folder}/PUT_NEW_MODELS_HERE/</b> "
             f"before you run the installer. It copies it into place and test-runs it "
@@ -164,8 +166,8 @@ def _fleet_section(machine: str = "AI ORIN") -> Section:
              "any other tagged car is ignored."),
         Term(machine, "Terminal 1 · ARENA", [
             ("arena fleet", "show: number of pursuers, model, and P1/P2/P3 -> tag -> CAR_INDEX"),
-            ("arena fleet --pursuers 3 --model models/<3-car model>",
-             "drive 3 cars from now on (refused unless the model is a 3-car model)"),
+            ("arena fleet --pursuers 3 --model models/c37_commit3_ft_g997",
+             "drive 3 cars with the hive model from now on"),
             ("arena fleet --pursuers auto --model models/n1_catch", "back to 1 car"),
             ("arena up --model models/<name>", "one session only: the car count follows the model"),
             ("arena cars", "check every car answers, with CAR_INDEX 0, 1, 2"),

@@ -1,0 +1,67 @@
+{
+ "onnx_vs_torch_max_abs": 8.58306884765625e-06,
+ "reference_vs_isaac": {
+  "obs": {
+   "max_abs": 0.4076061546802521,
+   "p999_abs": 0.06922592617572228,
+   "ticks_over_1e-4": 26,
+   "ticks": 9006
+  },
+  "playbook": {
+   "max_abs": 2.0,
+   "p999_abs": 4.558116197586322e-06,
+   "ticks_over_1e-4": 3,
+   "ticks": 9006
+  },
+  "command": {
+   "max_abs": 1.6574413776397705,
+   "p999_abs": 4.22984361648593e-06,
+   "ticks_over_1e-4": 3,
+   "ticks": 9006
+  },
+  "network": {
+   "max_abs": 9.5367431640625e-06,
+   "p999_abs": 7.624626159668732e-06,
+   "ticks_over_1e-4": 0,
+   "ticks": 9006
+  }
+ },
+ "closed_loop_roles_vs_isaac": {
+  "tick_agreement": 0.990894958916278,
+  "ticks": 9006,
+  "episodes": 64,
+  "episodes_diverging": 3,
+  "first_divergence_ticks": [
+   29,
+   83,
+   237
+  ]
+ },
+ "golden_replay_numpy": {
+  "max_abs": {
+   "obs": 0.0,
+   "role_logits": 0.0,
+   "settings": 0.0,
+   "residual": 0.0,
+   "command": 0.0
+  },
+  "role_mismatches": 0
+ },
+ "golden_replay_numpy_nep50": {
+  "max_abs": {
+   "obs": 0.0,
+   "role_logits": 0.0,
+   "settings": 0.0,
+   "residual": 0.0,
+   "command": 0.0
+  },
+  "role_mismatches": 0
+ },
+ "golden_ticks": 359,
+ "golden_role_agreement_with_isaac": 0.8356545961002786,
+ "versions": {
+  "torch": "2.7.0+cu128",
+  "numpy": "1.26.0",
+  "onnxruntime": "1.27.0"
+ }
+}

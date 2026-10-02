@@ -105,10 +105,39 @@ def check_pose_frame_parsing() -> list[str]:
     return failures
 
 
+def replay_runtime_goldens(model_dir: Path, runtime: str) -> list[str]:
+    """golden_vectors.json, recorded from the training code: every tick's
+    observation, raw network outputs, roles and commands must match what the
+    vendored runtime computes here, within the file's tolerance."""
+    import importlib
+    from pc_controller.loops import RUNTIMES
+
+    g = json.loads((model_dir / "golden_vectors.json").read_text(encoding="utf-8"))
+    tol = float(g.get("tolerance", 1e-5))
+    rt = importlib.import_module(RUNTIMES[runtime]).CommanderRuntime(str(model_dir))
+    worst = {k: 0.0 for k in ("obs", "role_logits", "settings", "residual", "command")}
+    ticks = role_mismatch = 0
+    for ep in g["episodes"]:
+        rt.reset(roles=ep["init_roles"])
+        for tick in ep["ticks"]:
+            rt.step(np.asarray(tick["pursuers"]), np.asarray(tick["evader"]), float(g.get("dt", 0.1)))
+            for k in worst:
+                err = float(np.abs(np.asarray(rt.last[k], dtype=np.float64) - np.asarray(tick[k])).max())
+                worst[k] = max(worst[k], err)
+            role_mismatch += rt.last["roles"] != tick["roles"]
+            ticks += 1
+    print(f"  {model_dir.name}: {ticks} golden ticks, max err "
+          + ", ".join(f"{k} {v:.1e}" for k, v in worst.items()) + f", role mismatches {role_mismatch}")
+    failures = [f"{model_dir.name}: {k} drift {v:.3e} > {tol:.0e}" for k, v in worst.items() if v > tol]
+    if role_mismatch:
+        failures.append(f"{model_dir.name}: {role_mismatch} tick(s) chose a different role than training")
+    return failures
+
+
 def check_runtime_models() -> list[str]:
     """Models whose manifest names a runtime (the hive role commander): the
-    vendored runtime must load them and turn one state into a finite command for
-    every car. Golden-vector replay is added when the first such model ships."""
+    vendored runtime must replay the model's golden vectors (when it ships them)
+    and turn a state into a finite command for every car."""
     from pc_controller.loops import RUNTIMES, make_loop, read_manifest
 
     failures = []
@@ -121,6 +150,8 @@ def check_runtime_models() -> list[str]:
             failures.append(f"{d.name}: runtime {runtime!r} has no vendored implementation")
             continue
         try:
+            if (d / "golden_vectors.json").exists():
+                failures += replay_runtime_goldens(d, runtime)
             loop = make_loop(d)
             n = loop.policy.num_pursuers
             for k in range(3):

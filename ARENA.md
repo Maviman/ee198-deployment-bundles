@@ -154,7 +154,7 @@ tags.
 
 ```bash
 ./arena fleet                                         # count, model, tag -> CAR_INDEX, installed models
-./arena fleet --pursuers 3 --model models/<3-car model>   # from now on (deploy/arena.local.conf)
+./arena fleet --pursuers 3 --model models/c37_commit3_ft_g997   # 3 cars, from now on (arena.local.conf)
 ./arena fleet --pursuers auto --model models/n1_catch     # back to one car
 ./arena up --model models/<name>                      # one session; the count follows the model
 ./arena cars                                          # every car answers, with the right CAR_INDEX?
@@ -172,6 +172,13 @@ Two kinds of model run on the same commands, picked by the manifest's
 - **Role commanders** (`"runtime": "hive_commander_v1"`, the hive model) run
   through the vendored runtime in `pc_controller/runtimes/`. For these, the
   dashboard colours each pursuer by its current role.
+
+`models/c37_commit3_ft_g997` is the hive commander from the AI Training repo
+(three pursuers, one shared network). Its golden vectors replay exactly in
+`selftest.py`. It was trained for a 6 m walled arena, with throttle as a speed
+command, and with no noise or latency, so it runs but chases weakly at 1.83 m.
+In `arena sim` it made 3 captures in 60 s (0 with `--buttons mod`). The retrain
+for the real arena and car is the fix; its model README lists the gaps.
 
 ## Watching a run
 

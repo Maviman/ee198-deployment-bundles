@@ -1,0 +1,394 @@
+{
+ "runtime": "hive_commander_v1",
+ "model": "c38_8ft_buttons",
+ "num_pursuers": 3,
+ "input_dim": 124,
+ "action_dim": 6,
+ "opset": 17,
+ "use_car_cameras": false,
+ "onnx": {
+  "input": {
+   "observations": [
+    1,
+    124
+   ]
+  },
+  "outputs": {
+   "role_logits": [
+    1,
+    3,
+    5
+   ],
+   "settings": [
+    1,
+    3,
+    2
+   ],
+   "residual": [
+    1,
+    3,
+    2
+   ]
+  },
+  "scaler_baked_in": true,
+  "settings_and_residual": "post-tanh"
+ },
+ "control_dt_s": 0.1,
+ "arena": {
+  "half_w": 1.2192,
+  "half_h": 1.2192,
+  "diag": 3.448418350490555,
+  "edge": "wall"
+ },
+ "car": {
+  "model": "driftking",
+  "max_speed_mps": 2.0,
+  "max_steer_rad": 0.5235987755982988,
+  "contact_nose_nose_m": 0.44,
+  "wheelbase_m": 0.259,
+  "lat_accel_max_mps2_with_margin": 2.3544
+ },
+ "capture_radius_m": 0.6,
+ "residual_scale": 0.5,
+ "time_in_role_scale_s": 10.0,
+ "obs_clip": 3.0,
+ "playbook_evader_velocity": true,
+ "forecast": {
+  "t_short_s": 0.5,
+  "t_long_s": 1.0,
+  "walls_clamp": true,
+  "num_headings": 32
+ },
+ "headings_f32": {
+  "32": {
+   "u": [
+    [
+     1.0,
+     0.0
+    ],
+    [
+     0.9807853102684021,
+     0.19509032368659973
+    ],
+    [
+     0.9238795042037964,
+     0.3826834559440613
+    ],
+    [
+     0.8314695954322815,
+     0.5555702447891235
+    ],
+    [
+     0.7071067690849304,
+     0.7071067690849304
+    ],
+    [
+     0.5555701851844788,
+     0.8314696550369263
+    ],
+    [
+     0.3826834261417389,
+     0.9238795638084412
+    ],
+    [
+     0.19509023427963257,
+     0.9807853102684021
+    ],
+    [
+     -4.371138828673793e-08,
+     1.0
+    ],
+    [
+     -0.19509032368659973,
+     0.9807853102684021
+    ],
+    [
+     -0.38268351554870605,
+     0.9238795042037964
+    ],
+    [
+     -0.5555703639984131,
+     0.8314695358276367
+    ],
+    [
+     -0.7071067690849304,
+     0.7071067690849304
+    ],
+    [
+     -0.8314696550369263,
+     0.5555701851844788
+    ],
+    [
+     -0.9238796234130859,
+     0.38268327713012695
+    ],
+    [
+     -0.9807853102684021,
+     0.19509030878543854
+    ],
+    [
+     -1.0,
+     -8.742277657347586e-08
+    ],
+    [
+     -0.9807852506637573,
+     -0.19509048759937286
+    ],
+    [
+     -0.9238795042037964,
+     -0.3826834559440613
+    ],
+    [
+     -0.8314695358276367,
+     -0.5555703043937683
+    ],
+    [
+     -0.7071066498756409,
+     -0.70710688829422
+    ],
+    [
+     -0.5555700063705444,
+     -0.8314697742462158
+    ],
+    [
+     -0.382683128118515,
+     -0.9238796830177307
+    ],
+    [
+     -0.1950903832912445,
+     -0.9807852506637573
+    ],
+    [
+     1.1924880638503055e-08,
+     -1.0
+    ],
+    [
+     0.1950904130935669,
+     -0.9807852506637573
+    ],
+    [
+     0.3826836049556732,
+     -0.9238794445991516
+    ],
+    [
+     0.5555704236030579,
+     -0.8314694762229919
+    ],
+    [
+     0.7071070075035095,
+     -0.7071065306663513
+    ],
+    [
+     0.8314695954322815,
+     -0.5555703043937683
+    ],
+    [
+     0.9238795638084412,
+     -0.3826834261417389
+    ],
+    [
+     0.9807853102684021,
+     -0.19509023427963257
+    ]
+   ],
+   "ang": [
+    0.0,
+    0.19634954631328583,
+    0.39269909262657166,
+    0.5890486240386963,
+    0.7853981852531433,
+    0.9817477464675903,
+    1.1780972480773926,
+    1.3744468688964844,
+    1.5707963705062866,
+    1.7671458721160889,
+    1.9634954929351807,
+    2.1598451137542725,
+    2.356194496154785,
+    2.552544116973877,
+    2.7488937377929688,
+    2.9452431201934814,
+    3.1415927410125732,
+    3.337942361831665,
+    3.5342917442321777,
+    3.7306413650512695,
+    3.9269909858703613,
+    4.123340606689453,
+    4.319690227508545,
+    4.5160393714904785,
+    4.71238899230957,
+    4.908738613128662,
+    5.105088233947754,
+    5.301437854766846,
+    5.4977874755859375,
+    5.694136619567871,
+    5.890486240386963,
+    6.086835861206055
+   ]
+  }
+ },
+ "roles": [
+  "CUTOFF",
+  "FLANK",
+  "PRESSURE",
+  "CLOSE"
+ ],
+ "role_actions": [
+  "KEEP",
+  "CUTOFF",
+  "FLANK",
+  "PRESSURE",
+  "CLOSE"
+ ],
+ "setting_ranges": {
+  "CUTOFF": [
+   [
+    -30.0,
+    30.0
+   ],
+   [
+    0.24384,
+    0.8128000000000001
+   ]
+  ],
+  "FLANK": [
+   [
+    -30.0,
+    30.0
+   ],
+   [
+    0.24384,
+    0.8128000000000001
+   ]
+  ],
+  "PRESSURE": [
+   [
+    -45.0,
+    45.0
+   ],
+   [
+    0.3251200000000001,
+    1.016
+   ]
+  ],
+  "CLOSE": [
+   [
+    -40.0,
+    40.0
+   ],
+   [
+    0.3,
+    1.0
+   ]
+  ]
+ },
+ "playbook": {
+  "max_steer": 0.5235987755982988,
+  "capture_radius": 0.6,
+  "max_speed_mps": 2.0,
+  "half_extent": [
+   1.2192,
+   1.2192
+  ],
+  "wall_inset_m": 0.3,
+  "edge_margin_m": null,
+  "edge_unblock_throttle": 0.3,
+  "cramped_turn_deg": 60.0,
+  "cramped_room_m": null,
+  "walls_count": true,
+  "num_headings": 32,
+  "second_lane_min_deg": 60.0,
+  "cutoff_max_m": 1.2192,
+  "cutoff_lead_s": 0.5,
+  "setting_scale": 0.40640000000000004,
+  "contact_nose_nose_m": 0.44,
+  "wheelbase_m": 0.259,
+  "lat_accel_max_mps2": 2.3544,
+  "binary_steer": false,
+  "contact_margin_m": 0.05,
+  "mate_gap_m": 0.11,
+  "close_margin_m": 0.1,
+  "pressure_keepout_frac": 0.6,
+  "pressure_speed_cap": 0.7,
+  "approach_gain_per_m": 0.75,
+  "stop_tol_m": 0.05,
+  "min_turn_throttle": 0.2,
+  "route_clear_m": 0.15,
+  "route_arc_step_deg": 25.0,
+  "reverse_deg": 120.0,
+  "reverse_within_m": 1.0,
+  "reverse_max": 0.5,
+  "evader_decel_mps2": 2.0,
+  "ff_gain": 1.0,
+  "mate_cone_deg": 30.0,
+  "mate_decel_mps2": 2.0,
+  "unblock_reverse": 0.15
+ },
+ "initial_roles": "uniform random per car at every reset (training); reset(roles=...) pins them",
+ "obs_layout": {
+  "tokens": [
+   "pursuer 0",
+   "pursuer 1",
+   "pursuer 2",
+   "evader"
+  ],
+  "per_token": [
+   "x/half_w",
+   "y/half_h",
+   "sin yaw",
+   "cos yaw",
+   "v_signed/max_speed",
+   "dist to evader/diag",
+   "sin bearing to evader",
+   "cos bearing to evader",
+   "(x+hw)/2hw",
+   "(hw-x)/2hw",
+   "(y+hh)/2hh",
+   "(hh-y)/2hh",
+   "role one-hot CUTOFF",
+   "FLANK",
+   "PRESSURE",
+   "CLOSE",
+   "time in role/scale (0..3)",
+   "setting z1",
+   "setting z2",
+   "dist to role target/diag",
+   "sin bearing to target",
+   "cos bearing to target",
+   "playbook throttle",
+   "playbook steer",
+   "CTRV x(+0.5 s)/hw",
+   "y(+0.5 s)/hh",
+   "x(+1 s)/hw",
+   "y(+1 s)/hh",
+   "yaw rate/3",
+   "evader only: escape now/diag",
+   "evader only: escape at +1 s/diag"
+  ],
+  "evader_token_zeros": "dist/bearing to itself (3) and all 12 role features",
+  "final": "nan -> 0, then clipped to [-obs_clip, obs_clip]"
+ },
+ "command": "[throttle, steer] per car in [-1, 1], +steer = left; = clip(playbook + residual_scale x residual)",
+ "actuation": {
+  "car_throttle_mode": "esc",
+  "pursuer_buttons": "mod",
+  "button_slot_s": 0.04,
+  "button_throttle_limit": 0.6,
+  "meaning": "the command went through the remote's buttons exactly as firmware V3 presses them (button_mod.h); run the firmware in the same mode, slot and limit"
+ },
+ "notes": [
+  "THROTTLE was the ESC STICK in training (open loop, no speed loop): +1 full forward, back = brake while rolling / reverse from a stop. Through the remote's buttons it becomes FWD/BACK presses (mod, limit 0.6).",
+  "Velocities are inputs (v_signed): the env gave true physics velocities. Yaw rate is derived inside, from the previous step's yaw over dt.",
+  "Car order: the commander is permutation-equivariant across pursuers; outputs follow input order.",
+  "Trained with NO latency and NO pose noise."
+ ],
+ "known_transfer_gaps": [
+  "Arena: this manifest is for a 2.438 m square; the model trained with PHYSICAL WALLS (the real arena has a tape line). Role lengths follow the arena size (setting_scale 0.4064); car size, speed and turning are absolute.",
+  "Car: sim driftking (contact 0.44 m, wheelbase 0.259 m, max steer 0.524 rad, speed scale 2.0 m/s). The real car's size is not settled.",
+  "Evader: a simulated planner at difficulty d = 1, not a human driver."
+ ],
+ "checkpoint": {
+  "timestep": 12000,
+  "evader_difficulty": 1.0
+ }
+}

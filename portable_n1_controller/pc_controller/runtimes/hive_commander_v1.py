@@ -55,7 +55,19 @@ def unit(a):
     return np.stack((np.cos(a), np.sin(a)), axis=-1)
 
 
-def headings(k: int):
+def heading_tables(m: dict) -> dict:
+    """The manifest's exact heading tables, {K: (unit vectors (K, 2), angles (K,))}. Training builds them in float32
+    (roles.headings), where the axis headings are not exactly axis-aligned (cos 270 deg = +1.2e-8) and the wall test
+    depends on it; numpy's float32 trig differs from torch's by an ulp, so the table is SHIPPED, not recomputed."""
+    return {int(k): (np.array(v["u"], dtype=G), np.array(v["ang"], dtype=G))
+            for k, v in m.get("headings_f32", {}).items()}
+
+
+def headings(k: int, table=None):
+    """The shipped table when there is one; otherwise the legacy float64 table (the c37 manifests, whose goldens were
+    built with it)."""
+    if table is not None:
+        return table[0]
     return unit(np.arange(k, dtype=G) * (2.0 * math.pi / k))
 
 
@@ -86,11 +98,11 @@ def intercept_distance(ppos, epos, lane, hw: float, hh: float):
     return np.clip(t, 0.0, diag).astype(G)
 
 
-def lanes(ppos, epos, hw, hh, walls: bool, k: int, second_lane_min_deg: float, plateau_m: float = 0.05):
+def lanes(ppos, epos, hw, hh, walls: bool, k: int, second_lane_min_deg: float, plateau_m: float = 0.05, table=None):
     """roles.lanes: (u_star, u2, ang_star, ang2, escape)."""
-    u = headings(k)
+    u = headings(k, table)
     t = escape_per_heading(ppos, epos, hw, hh, u, walls=walls)               # (B, K)
-    ang_k = np.arange(k, dtype=G) * (2.0 * math.pi / k)
+    ang_k = table[1] if table is not None else np.arange(k, dtype=G) * (2.0 * math.pi / k)
     top = (t >= t.max(axis=1, keepdims=True) - plateau_m).astype(G)
     ang_star = np.arctan2((top * np.sin(ang_k)).sum(1), (top * np.cos(ang_k)).sum(1))
     sep = np.abs(wrap_to_pi(ang_k[None, :] - ang_star[:, None]))
@@ -144,9 +156,10 @@ class Playbook:
     length_scale multiplies the few lengths roles.py hard-codes (1.0 = the training code exactly); a manifest that
     scales all its lengths and speeds by s sets it to s (a geometrically similar arena, e.g. 6 m -> 1.83 m)."""
 
-    def __init__(self, cfg: dict, setting_ranges: dict, length_scale: float = 1.0):
+    def __init__(self, cfg: dict, setting_ranges: dict, length_scale: float = 1.0, tables: dict | None = None):
         self.c = dict(cfg)
         self.L = float(length_scale)
+        self.table = (tables or {}).get(int(cfg["num_headings"]))
         self.hw, self.hh = float(cfg["half_extent"][0]), float(cfg["half_extent"][1])
         self.lo = np.array([[setting_ranges[r][k][0] for k in range(2)] for r in ROLE_NAMES], dtype=G)
         self.hi = np.array([[setting_ranges[r][k][1] for k in range(2)] for r in ROLE_NAMES], dtype=G)
@@ -173,7 +186,7 @@ class Playbook:
         c, hw, hh = self.c, self.hw, self.hh
         walls = bool(c["walls_count"])
         u_star, _, ang_star, ang2, _ = lanes(ppos, epos, hw, hh, walls, int(c["num_headings"]),
-                                             c["second_lane_min_deg"], 0.05 * self.L)
+                                             c["second_lane_min_deg"], 0.05 * self.L, self.table)
         e = epos[:, None, :]
         rel = ppos - e
         d_e = np.linalg.norm(rel, axis=-1)
@@ -184,7 +197,7 @@ class Playbook:
             e_lead = epos + evel * c["cutoff_lead_s"]
             e_lead = np.stack((np.clip(e_lead[:, 0], -hw, hw), np.clip(e_lead[:, 1], -hh, hh)), axis=-1).astype(G)
             _, _, ls_star, ls2, _ = lanes(ppos, e_lead, hw, hh, walls, int(c["num_headings"]), c["second_lane_min_deg"],
-                                          0.05 * self.L)
+                                          0.05 * self.L, self.table)
         else:
             e_lead, ls_star, ls2 = epos, ang_star, ang2
         lane_ang = np.where(role == FLANK, ls2[:, None], ls_star[:, None]) + np.deg2rad(a1)
@@ -355,7 +368,8 @@ def observation(m: dict, pb: Playbook, ppos, pyaw, pspd, epos, eyaw, espd, role,
     if walls:
         f05 = np.stack((np.clip(f05[..., 0], -hw, hw), np.clip(f05[..., 1], -hh, hh)), axis=-1).astype(G)
         f10 = np.stack((np.clip(f10[..., 0], -hw, hw), np.clip(f10[..., 1], -hh, hh)), axis=-1).astype(G)
-    u_k = headings(int(m["forecast"]["num_headings"]))
+    k_obs = int(m["forecast"]["num_headings"])
+    u_k = headings(k_obs, heading_tables(m).get(k_obs))
     esc_now = escape_per_heading(ppos, epos, hw, hh, u_k, walls=walls).max(axis=1)
     esc_pred = escape_per_heading(f10[:, :n], f10[:, n], hw, hh, u_k, walls=walls).max(axis=1)
     scale = np.array([hw, hh], dtype=G)
@@ -383,7 +397,8 @@ class CommanderRuntime:
         if self.m.get("use_car_cameras"):
             raise ValueError("this runtime is overhead-camera only")
         self.n = int(self.m["num_pursuers"])
-        self.pb = Playbook(self.m["playbook"], self.m["setting_ranges"], self.m.get("length_scale", 1.0))
+        self.pb = Playbook(self.m["playbook"], self.m["setting_ranges"], self.m.get("length_scale", 1.0),
+                           heading_tables(self.m))
         self.residual_scale = float(self.m["residual_scale"])
         if session is None:
             import onnxruntime as ort

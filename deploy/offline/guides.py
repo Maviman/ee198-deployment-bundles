@@ -18,7 +18,7 @@ REPO = "~/ee198-deployment-bundles"
 VENV_PY = "~/.venvs/n1ctl/bin/python"
 MODELS = f"{REPO}/portable_n1_controller/models"
 N1_MODEL = "models/n1_catch"                         # 1 car: the locked, tested default
-N3_MODEL = "models/c37_commit3_ft_g997_arena183"     # 3 cars: the hive commander scaled to 1.83 m
+N3_MODEL = "models/c38_8ft_buttons"                  # 3 cars: the hive commander for the 8 x 8 ft arena
 
 
 # ------------------------------------------------------------------ model
@@ -86,11 +86,12 @@ def _models_section(folder: str, script: str) -> Section:
         Para(f"A model is a folder with three files: <code>policy.onnx</code>, "
              f"<code>policy.onnx.manifest.json</code> and <code>metrics.json</code>. "
              f"The AI Orin keeps them in:<br><code>{MODELS}/&lt;name&gt;/</code><br>"
-             f"Four ship with the code: <code>n1_catch</code> (1 car, the locked default), "
-             f"<code>n1_pin</code> (1 car), and the 3-car hive commander twice: "
-             f"<code>c37_commit3_ft_g997_arena183</code> (scaled to the 1.83 m arena, the one to use) "
-             f"and <code>c37_commit3_ft_g997</code> (as trained, 6 m arena). The hive network was trained "
-             f"on a simulated car, not yours, so treat 3-car runs as experiments until it is retrained."),
+             f"Five ship with the code: <code>n1_catch</code> (1 car, the locked default), "
+             f"<code>n1_pin</code> (1 car), and the 3-car hive commander three times: "
+             f"<code>c38_8ft_buttons</code> (the one to use: retrained for the 8 x 8 ft arena with the "
+             f"button firmware in modulated mode), <code>c37_commit3_ft_g997_arena183</code> (older, "
+             f"scaled to 1.83 m) and <code>c37_commit3_ft_g997</code> (older, 6 m). The hive network was "
+             f"trained on a simulated car, so treat 3-car runs as experiments."),
         Steps([
             f"<b>Easiest:</b> put your model folder inside <b>{folder}/PUT_NEW_MODELS_HERE/</b> "
             f"before you run the installer. It copies it into place and test-runs it "
@@ -120,7 +121,7 @@ def _fleet_overview() -> Section:
              "same commands; only the <code>arena fleet</code> line at the start differs. "
              "<code>arena up</code> refuses to start if the car count and the model disagree."),
         Table(("", "1 car (N=1)", "3 cars (N=3)"), [
-            ("model", f"<code>{N1_MODEL}</code>", f"<code>{N3_MODEL}</code> (the hive commander, scaled to 1.83 m)"),
+            ("model", f"<code>{N1_MODEL}</code>", f"<code>{N3_MODEL}</code> (the hive commander, 8 x 8 ft arena)"),
             ("on the floor", "1 pursuer + the evader", "3 pursuers + the evader"),
             ("pursuer roof tags", "tag 1 = CAR_INDEX 0", "tags 1, 2, 3 = CAR_INDEX 0, 1, 2"),
             ("evader roof tag", "tag 0", "tag 0"),

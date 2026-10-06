@@ -158,7 +158,7 @@ the other tags.
 
 ```bash
 ./arena fleet                                         # count, model, tag -> CAR_INDEX, installed models
-./arena fleet --pursuers 3 --model models/c37_commit3_ft_g997_arena183   # 3 cars, from now on
+./arena fleet --pursuers 3 --model models/c38_8ft_buttons   # 3 cars, from now on (8 x 8 ft arena)
 ./arena fleet --pursuers 1 --model models/n1_catch        # back to the locked default
 ./arena up --model models/<name>                      # one session; the count follows the model
 ./arena cars                                          # every car answers, with the right CAR_INDEX?
@@ -178,18 +178,23 @@ Two kinds of model run on the same commands, picked by the manifest's
   dashboard colours each pursuer by its current role.
 
 The hive commander from the AI Training repo (three pursuers, one shared
-network) ships twice. Both replay their golden vectors exactly in `selftest.py`:
+network) ships three times. All replay their golden vectors exactly in `selftest.py`:
 
-| model | what | `arena sim`, captures in 60 s |
+| model | what | training result |
 |---|---|---|
-| `models/c37_commit3_ft_g997_arena183` | **use this one**: the same network in a world scaled ×0.305 to the 1.83 m arena, so its role targets stay inside the tape | 11 (4 with `--buttons mod`) |
-| `models/c37_commit3_ft_g997` | as trained: a 6 m walled arena | 3 and 6 in two runs |
+| `models/c38_8ft_buttons` | **use this one** (2026-10-05): retrained for the **8 × 8 ft arena** with the V3 button firmware in the loop (modulated, 40 ms slots, throttle limit 0.6) on an ESC-stick car | 99.9% captures at the hardest simulated evader, 4.8 s each |
+| `models/c37_commit3_ft_g997_arena183` | the older network scaled ×0.305 to the 1.83 m arena; trained with throttle as a speed command | `arena sim`: 11 captures in 60 s (4 with `--buttons mod`) |
+| `models/c37_commit3_ft_g997` | the older network as trained: a 6 m walled arena | `arena sim`: 3 and 6 in two runs |
 
-These are single short runs, against an easy simulated evader, with instant
-steering (`n1_catch`: 10). The network was trained on a simulated car with
-throttle as a speed command and no noise or latency, and that does not scale.
-Treat 3-car runs as experiments until a retrain on the real car. The model
-READMEs list the gaps.
+`c38_8ft_buttons` expects the firmware in **modulated** mode with its default
+slot (40 ms) and limit (0.6); its manifest's `actuation` block says so. It was
+trained against simulated walls (the real arena has a tape line), on a simulated
+DriftKing-size car, with no pose noise or latency. **Before running it, set the
+perception arena to 8 × 8 ft**: `portable_orin_perception/config/arena_test_6ft.yaml`
+still says 1.83 m, and the ArUco detector gates poses with it. For other arena
+sizes the AI Training repo builds the same model's manifest per size
+(`build_commander_handoff.py --arena-side`; 6, 10, 12 and 16 ft are built there).
+Treat 3-car runs as experiments; the model READMEs list the gaps.
 
 ## Watching a run
 

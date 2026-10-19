@@ -48,7 +48,7 @@ DPI = 300
 
 # For the pixel-budget report only — keep in step with perception.launch.py.
 CAPTURE_WIDTHS = (640, 1280)
-ARENA_WIDTH_M = 1.83
+ARENA_WIDTH_M = 2.4384   # 8 x 8 ft (was 1.83, 6 ft)
 
 
 def report_pixel_budget(marker_map) -> None:

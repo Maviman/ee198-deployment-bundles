@@ -189,9 +189,10 @@ network) ships three times. All replay their golden vectors exactly in `selftest
 `c38_8ft_buttons` expects the firmware in **modulated** mode with its default
 slot (40 ms) and limit (0.6); its manifest's `actuation` block says so. It was
 trained against simulated walls (the real arena has a tape line), on a simulated
-DriftKing-size car, with no pose noise or latency. **Before running it, set the
-perception arena to 8 × 8 ft**: `portable_orin_perception/config/arena_test_6ft.yaml`
-still says 1.83 m, and the ArUco detector gates poses with it. For other arena
+DriftKing-size car, with no pose noise or latency. The perception arena
+(`portable_orin_perception/config/arena_test_6ft.yaml`, name kept) is set to
+8 × 8 ft (2.4384 m) since 2026-10-19; re-measure the calibration markers and
+re-run calibration after moving them. For other arena
 sizes the AI Training repo builds the same model's manifest per size
 (`build_commander_handoff.py --arena-side`; 6, 10, 12 and 16 ft are built there).
 Treat 3-car runs as experiments; the model READMEs list the gaps.

@@ -280,13 +280,20 @@ def test_calibrate_scans_then_brings_the_camera_service_back(rig, tmp_path):
     assert job["lines"] == ["arena scan", "--- arena up ---", "arena up"]
 
 
-def test_a_failed_calibration_says_so_and_does_not_restart_on_the_old_frame(rig, tmp_path):
-    r = rig(arena_cli=script(tmp_path, '[ "$1" = scan ] && { echo "SCAN FAILED: tag 13 not seen"; exit 1; }\n'
+def test_a_failed_calibration_says_so_but_brings_the_camera_back_to_fix_tags_by(rig, tmp_path):
+    r = rig(arena_cli=script(tmp_path, '[ "$1" = scan ] && { echo "SCAN FAILED: tag 11 not seen"; exit 1; }\n'
                                        'echo "arena $1"\n'))
     assert r.post("/api/scan")[0] == 200
     job = wait_job(r)
-    assert job["ok"] is False and job["rc"] == 1
-    assert job["lines"] == ["SCAN FAILED: tag 13 not seen"], "no `arena up` after a failed scan"
+    assert job["ok"] is False and job["rc"] == 1, "the scan's failure is the job's result"
+    assert job["lines"] == ["SCAN FAILED: tag 11 not seen", "--- arena up ---", "arena up"]
+
+
+def test_initialize_does_not_retry_after_its_own_failure(rig, tmp_path):
+    r = rig(arena_cli=script(tmp_path, 'echo "arena $1"; exit 3\n'))
+    assert r.post("/api/init")[0] == 200
+    job = wait_job(r)
+    assert job["rc"] == 3 and job["lines"] == ["arena up"]
 
 
 def test_calibrate_shares_one_slot_with_initialize_and_refuses_while_armed(rig, tmp_path):

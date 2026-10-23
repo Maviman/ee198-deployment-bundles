@@ -332,7 +332,7 @@ function render() {
     : !S.can_init ? "this hub was started without --arena-cli: run ./arena scan in a terminal"
     : armedNow ? "the car is ARMED: press STOP first"
     : "Re-fit the arena frame from the four corner tags (arena scan; the car is disarmed and the camera "
-      + "service paused), then restart the camera service if the scan passed";
+      + "service paused), then restart the camera service";
   $("checks").innerHTML = (rd.checks || []).map((x) =>
     `<div class="${x.ok ? "c-ok" : "c-bad"}">${x.name}${x.detail ? ` <span class="d">— ${x.detail}</span>` : ""}</div>`).join("")
     || `<div class="sub">no data</div>`;

@@ -31,7 +31,7 @@ never slow a pose frame or a command.
                            /api/init runs `<--arena-cli> up`: starts whatever is not
                            running and leaves the cars DISARMED.
     POST /api/scan         CALIBRATE, same rules as /api/init: `<--arena-cli> scan` (it
-                           disarms first), then `arena up` again if the scan passed.
+                           disarms first), then `arena up` to restore the camera service.
     GET  /api/scan.png     the annotated snapshot of the latest scan.
 """
 
@@ -443,12 +443,15 @@ class Hub:
 
     def calibrate(self) -> tuple[int, dict]:
         """CALIBRATE: `<arena-cli> scan` (disarms, stops the camera service, re-fits the arena
-        frame on the vision Orin), then, only if the scan passed, `<arena-cli> up` to bring the
-        camera service back. A failed scan leaves it stopped: the old calibration is no good."""
+        frame on the vision Orin), then `<arena-cli> up` to bring the camera service back. Also
+        after a FAILED scan: the operator needs the live picture to fix a tag, and START stays
+        refused, because a calibration the corners no longer match raises the drift error alert.
+        The job still reports the scan's failure."""
         return self._start_job("scan")
 
-    JOBS = {"init": ("INITIALIZE", [("up", 150)]),
-            "scan": ("CALIBRATE", [("scan", 150), ("up", 150)])}
+    # kind -> (button, [(arena subcommand, time limit s, run even if an earlier step failed)])
+    JOBS = {"init": ("INITIALIZE", [("up", 150, False)]),
+            "scan": ("CALIBRATE", [("scan", 150, False), ("up", 150, True)])}
 
     def _start_job(self, kind: str) -> tuple[int, dict]:
         label = self.JOBS[kind][0]
@@ -466,13 +469,15 @@ class Hub:
             self.init_job.update(kind=kind, running=True, started=time.time(), finished=None,
                                  ok=None, rc=None, lines=[])
         threading.Thread(target=self._run_job, args=(cli, kind), daemon=True).start()
-        self.event(f"{label} pressed: " + " then ".join(f"arena {s}" for s, _ in self.JOBS[kind][1]))
+        self.event(f"{label} pressed: " + " then ".join(f"arena {s[0]}" for s in self.JOBS[kind][1]))
         return 200, {"started": True}
 
     def _run_job(self, cli: str, kind: str) -> None:
         label, steps = self.JOBS[kind]
-        lines, rc = self.init_job["lines"], None
-        for i, (sub, limit) in enumerate(steps):
+        lines, first_bad = self.init_job["lines"], 0
+        for i, (sub, limit, always) in enumerate(steps):
+            if first_bad != 0 and not always:
+                break
             if i:
                 lines.append(f"--- arena {sub} ---")
             rc, deadline = None, time.time() + limit
@@ -493,8 +498,9 @@ class Hub:
                 rc = p.wait(timeout=10)
             except (OSError, subprocess.SubprocessError) as exc:
                 lines.append(f"could not run {cli}: {exc}")
-            if rc != 0:
-                break
+            if rc != 0 and first_bad == 0:
+                first_bad = rc
+        rc = first_bad
         self.init_job.update(running=False, finished=time.time(), rc=rc, ok=(rc == 0))
         self.event(f"{label} finished: " + ("ok" if rc == 0 else f"needs attention (exit {rc})"))
 

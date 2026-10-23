@@ -25,6 +25,16 @@
   button.stop { background: var(--err); color: #fff; border: 0; border-radius: 6px;
                 font: 800 15px system-ui; padding: 10px 22px; cursor: pointer; letter-spacing: .08em; }
   button.stop:active { transform: translateY(1px); }
+  button.act { border: 1px solid var(--line); background: #1c2129; color: var(--text); border-radius: 6px;
+               font: 700 13px system-ui; padding: 10px 16px; cursor: pointer; letter-spacing: .06em; }
+  button.act:disabled { opacity: .4; cursor: not-allowed; }
+  button.act.go { background: var(--ok); color: #04210b; border-color: var(--ok); }
+  button.act.confirm { background: var(--warn); color: #231a00; border-color: var(--warn); }
+  .checks { font: 12px var(--mono); display: grid; gap: 3px; }
+  .checks .c-ok::before { content: "\2713  "; color: var(--ok); }
+  .checks .c-bad::before { content: "\2717  "; color: var(--err); }
+  .checks .d { color: var(--dim); }
+  #initlog { font: 11px var(--mono); color: var(--dim); max-height: 150px; overflow: auto; white-space: pre-wrap; margin-top: 6px; }
   main { padding: 12px 16px; display: grid; gap: 12px;
          grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); }
   .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px;
@@ -79,6 +89,8 @@
     <div class="sub">tick</div>
     <div class="big" id="tick">&ndash;</div>
   </div>
+  <button class="act" id="init" title="Bring the whole system up (arena up): starts whatever is not running; the cars stay DISARMED">INITIALIZE</button>
+  <button class="act go" id="start" title="ARM the car: the policy drives. Only from a browser on the control Orin, and only when every check is green">START</button>
   <button class="stop" id="stop" title="E-stop every car now (keeps services running; re-arm with `arena go`)">STOP</button>
 </header>
 <main>
@@ -93,6 +105,12 @@
     <canvas id="map" width="600" height="600"></canvas>
   </section>
   <div class="row3">
+    <section class="panel">
+      <h2>Ready to start? <span class="sub" id="readysub"></span></h2>
+      <div class="checks" id="checks"></div>
+      <div class="sub" id="runinfo" style="margin-top:8px"></div>
+      <div id="initlog"></div>
+    </section>
     <section class="panel">
       <h2>Latency (p50)</h2>
       <div class="bar" id="latbar"><span class="budget" id="budget"></span></div>
@@ -133,6 +151,37 @@ $("stop").onclick = async () => {
   stopError = msg ? `STOP FAILED: ${msg}. Use \`arena halt\`, or cut power to the cars.` : null;
   $("stop").textContent = msg ? "STOP FAILED" : "STOPPED";
   setTimeout(() => ($("stop").textContent = "STOP"), msg ? 5000 : 1200);
+  if (S) render();
+};
+
+// START / INITIALIZE. The hub re-checks everything and answers 403 unless this page is open on the
+// control Orin itself; the X-Arena header is what keeps another web page from pressing them for you.
+let actionMsg = null, startConfirmUntil = 0;
+async function post(path) {
+  const r = await fetch(path, { method: "POST", headers: { "X-Arena": "control" } });
+  let j = {};
+  try { j = await r.json(); } catch (e) { /* no body */ }
+  return { ok: r.ok, j };
+}
+$("init").onclick = async () => {
+  actionMsg = null; $("init").disabled = true;
+  try {
+    const { ok, j } = await post("/api/init");
+    if (!ok) actionMsg = "INITIALIZE refused: " + (j.error || "unknown");
+  } catch (e) { actionMsg = "hub unreachable: " + e; }
+  if (S) render();
+};
+$("start").onclick = async () => {
+  if (Date.now() > startConfirmUntil) {           // first click only asks; the second, within 5 s, arms
+    startConfirmUntil = Date.now() + 5000;
+    if (S) render();
+    return;
+  }
+  startConfirmUntil = 0; actionMsg = null;
+  try {
+    const { ok, j } = await post("/api/arm");
+    if (!ok) actionMsg = "START refused: " + (j.error || "unknown");
+  } catch (e) { actionMsg = "hub unreachable: " + e; }
   if (S) render();
 };
 
@@ -199,13 +248,15 @@ function drawMap() {
   if (v && fresh("vision")) for (const veh of v.vehicles || []) if (veh.x != null) {
     const slot = /^P(\d+)$/.exec(veh.role || "");
     const role = carRoles && slot ? String(carRoles[+slot[1] - 1] || "").toUpperCase() : "";
-    cars.push({ x: veh.x, y: veh.y, h: veh.h, label: role ? `${veh.role} ${role}` : veh.role,
+    const held = !!(c && c.hold && slot && c.hold[+slot[1] - 1]);
+    cars.push({ x: veh.x, y: veh.y, h: veh.h, label: (role ? `${veh.role} ${role}` : veh.role) + (held ? " HOLD" : ""),
                 ev: veh.role === "EVADER", seen: veh.seen, color: ROLE_COLORS[role] });
   }
-  if (c && c.poses && c.capture_radius) {
+  const ringR = c && (c.hold_radius || c.capture_radius);
+  if (c && c.poses && ringR) {
     const [ex, ey] = c.poses.evader;
-    g.strokeStyle = "rgba(255,123,114,.6)"; g.setLineDash([5, 5]); g.beginPath();
-    g.arc(X(ex), Y(ey), c.capture_radius * s, 0, 2 * Math.PI); g.stroke(); g.setLineDash([]);
+    g.strokeStyle = c.hold_radius ? "rgba(63,185,80,.75)" : "rgba(255,123,114,.6)"; g.setLineDash([5, 5]); g.beginPath();
+    g.arc(X(ex), Y(ey), ringR * s, 0, 2 * Math.PI); g.stroke(); g.setLineDash([]);
   }
   for (const car of cars) {
     const L = 0.19 * s * 0.6;
@@ -216,7 +267,8 @@ function drawMap() {
     g.fillStyle = "#d6dde6"; g.font = "13px system-ui"; g.fillText(car.label, X(car.x) + 12, Y(car.y) - 10);
   }
   if (c && c.dist) $("mapsub").textContent = "distance to evader: " + c.dist.map((d) => d.toFixed(2) + " m").join(", ")
-    + (c.capture_radius ? ` · dashed ring = the policy's capture radius (${c.capture_radius.toFixed(2)} m)` : "");
+    + (c.hold_radius ? ` · green ring = hold zone (${c.hold_radius.toFixed(2)} m): a car inside it stands still`
+       : c.capture_radius ? ` · dashed ring = the policy's capture radius (${c.capture_radius.toFixed(2)} m)` : "");
 }
 
 // The hive demo's role colours, except CUTOFF: red is the evader here.
@@ -253,7 +305,36 @@ function render() {
   const per = c && c.period_ms;
   $("tick").innerHTML = per && per.p50 ? `${(1000 / per.p50).toFixed(1)} <span class="sub">Hz</span>` : "–";
 
-  const al = (stopError ? [{ level: "error", text: stopError }] : []).concat(S.alerts || []);
+  // START / INITIALIZE buttons and the readiness panel
+  const rd = S.ready || { ok: false, checks: [] }, run = S.run || {}, job = S.init || {};
+  const armedNow = !!(c && fresh("control") && c.armed), canCtl = !!S.can_control;
+  const confirming = !armedNow && Date.now() < startConfirmUntil;
+  $("start").disabled = !(canCtl && rd.ok && !armedNow);
+  $("start").classList.toggle("confirm", confirming);
+  $("start").textContent = armedNow ? `ARMED · ${Math.ceil(run.remaining_s ?? 0)} s` : confirming ? "CONFIRM: AREA CLEAR?" : "START";
+  $("start").title = !canCtl ? "START only works from a browser on the control Orin itself"
+    : !rd.ok ? "not ready: see \"Ready to start?\" below" : "ARM the car: the policy drives. Click twice within 5 s.";
+  $("init").disabled = !(canCtl && S.can_init) || armedNow || !!job.running;
+  $("init").textContent = job.running ? "INITIALIZING…" : "INITIALIZE";
+  $("init").title = !canCtl ? "INITIALIZE only works from a browser on the control Orin itself"
+    : !S.can_init ? "this hub was started without --arena-cli: run ./arena up in a terminal"
+    : "Bring the whole system up (arena up): starts whatever is not running; the cars stay DISARMED";
+  $("checks").innerHTML = (rd.checks || []).map((x) =>
+    `<div class="${x.ok ? "c-ok" : "c-bad"}">${x.name}${x.detail ? ` <span class="d">— ${x.detail}</span>` : ""}</div>`).join("")
+    || `<div class="sub">no data</div>`;
+  $("readysub").textContent = armedNow ? "ARMED" : rd.ok ? "all green" : "not ready";
+  $("readysub").className = "sub " + (armedNow ? "ok" : rd.ok ? "ok" : "warn");
+  $("runinfo").textContent = armedNow
+    ? `Running: stops by itself after ${run.cap_s} s (${Math.ceil(run.remaining_s ?? 0)} s left), if the car leaves the arena, or if the pose feed is lost. STOP ends it at once.`
+    : (run.halt_reason ? `Last run ended: ${run.halt_reason}.` : "")
+      + (rd.hold_radius ? ` Hold zone ${rd.hold_radius} m: the car stands still inside it and keeps tracking.`
+         : c ? " Hold zone is OFF: the car keeps driving at any distance from the evader." : "")
+      + (canCtl ? "" : " START and INITIALIZE only work from a browser on the control Orin; STOP works from anywhere.");
+  $("initlog").textContent = job.started
+    ? (job.running ? "initializing…\n" : job.ok ? "initialize finished: ok\n" : "initialize finished: NEEDS ATTENTION (exit " + job.rc + ")\n") + (job.lines || []).join("\n")
+    : "";
+
+  const al = (actionMsg ? [{ level: "error", text: actionMsg }] : []).concat(stopError ? [{ level: "error", text: stopError }] : []).concat(S.alerts || []);
   $("alerts").innerHTML = al.length
     ? al.map((a) => `<div class="alert ${a.level}">${a.text}</div>`).join("")
     : `<div class="alert okay">all nominal</div>`;

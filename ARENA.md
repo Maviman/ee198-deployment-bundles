@@ -205,8 +205,12 @@ READMEs list the gaps.
 - **Browser:** `http://<control-orin>:8080`. Live camera with detection
   outlines, top-down arena with trails, camera→command latency broken into
   stages against the 100 ms budget, per-car throttle/steer/radio round trip/
-  signal, vision health, alerts, and a **STOP** button (anyone watching can
-  stop the cars; arming is terminal-only).
+  signal, vision health, alerts, a **STOP** button (anyone watching can stop the
+  cars) and, **only in a browser on the control Orin itself**, **INITIALIZE**
+  (`arena up`: starts whatever is not running, cars stay disarmed) and **START**
+  (arms, after two clicks and only while the "Ready to start?" panel is all green;
+  the run stops itself after 120 s, when the car leaves the arena, or when the pose
+  feed is lost). Anyone else on the network gets 403 on those two.
 - **Terminal:** `./arena monitor`. Same data, works over SSH.
 - **Logs:** `./arena logs vision|controller|hub [-f]`. Every run's telemetry
   is also saved on the control Orin in `~/.arena/runs/<timestamp>/telemetry.jsonl`.
@@ -239,9 +243,13 @@ Every hop fails to *stopped*:
    0.35-0.45 s (measured on blocks, 2026-10-02), so budget that on top of the 0.3 s.
 4. **Disarmed is the default.** `arena up` starts with every car receiving
    E-stop packets (which still get ACKed, so the dashboard shows radio health
-   before anything moves). Only `arena go` arms, and only from a shell on the
-   control Orin: the arm port listens on localhost. `arena halt`, the dashboard
-   STOP, Ctrl-C and `arena stop` all E-stop on the next packet.
+   before anything moves). Only two things arm, both on the control Orin: `arena go`
+   from a shell, and the dashboard's START button from a browser on that machine
+   (the arm port itself still listens on localhost only; the hub re-checks readiness,
+   refuses other machines and cross-site requests, and its watchdog disarms a run at
+   the 120 s cap, when the car leaves the arena, or when the pose feed is lost). `arena
+   halt`, the dashboard STOP (from anywhere), Ctrl-C and `arena stop` all E-stop on
+   the next packet.
 5. Crashes: the vision service and controller run under a supervisor that
    restarts them in about a second (cars sit in failsafe meanwhile). After 5
    crashes in 60 s it gives up and says why (`arena logs`).

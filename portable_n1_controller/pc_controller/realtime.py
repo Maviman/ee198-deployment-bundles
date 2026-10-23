@@ -58,6 +58,58 @@ class _Window:
         return {"p50": round(at(0.5), 2), "p95": round(at(0.95), 2), "max": round(s[-1], 2)}
 
 
+class HoldZone:
+    """Stand-still zone around the evader (``run_controller.py --hold-radius``).
+
+    While a car is within ``radius`` metres of the evader its command is [0, 0]: every
+    button released. This is NOT an E-stop and NOT a capture: the car stays ARMED, the
+    link stays live (the firmware's dead-man keeps being fed), the poses keep being
+    tracked and the policy keeps being asked on every tick. The car goes back to the
+    policy as soon as the evader is more than ``radius + resume_margin`` away, so it
+    follows an evader that moves off. The margin is hysteresis: pose noise on the
+    boundary must not chatter the buttons. Each car is judged on its own distance.
+
+    Only the command that is SENT is overridden. A model with an action history (k > 0)
+    still records its own un-held output there; the deployed n1_catch has no history.
+    """
+
+    def __init__(self, radius: float, resume_margin: float = 0.10) -> None:
+        if not radius > 0.0:
+            raise ValueError("hold radius must be > 0 metres")
+        self.radius = float(radius)
+        self.resume_radius = self.radius + max(0.0, float(resume_margin))
+        self.held: list[bool] = []
+
+    def reset(self) -> None:
+        """After a stall or re-arm: nobody is held until the next pose says so."""
+        self.held = []
+
+    def apply(self, action, pursuers, evader, log=None):
+        """``action`` (throttle, steer per pursuer) with every held car zeroed.
+
+        Returns ``action`` itself when nobody is held, otherwise a copy; the policy's own
+        output is never modified in place."""
+        if len(self.held) != len(pursuers):
+            self.held = [False] * len(pursuers)
+        out = action
+        for i, p in enumerate(pursuers):
+            d = math.hypot(p.x - evader.x, p.y - evader.y)
+            was = self.held[i]
+            now = d <= self.radius or (was and d <= self.resume_radius)
+            if now != was:
+                self.held[i] = now
+                if log is not None:
+                    log(f"car {i} HOLD: {d:.2f} m from the evader (<= {self.radius:g} m): buttons "
+                        f"released, still armed and tracking" if now else
+                        f"car {i} RESUME: evader {d:.2f} m away (> {self.resume_radius:g} m): driving again")
+            if now:
+                if out is action:
+                    out = action.copy()
+                out[2 * i] = 0.0
+                out[2 * i + 1] = 0.0
+        return out
+
+
 class Telemetry:
     def __init__(self, target: str | None) -> None:
         self.addr = None
@@ -114,15 +166,18 @@ class ControlPort:
 def run_realtime(loop, link, *, pose_port: int, tick_hz: float = 10.0, stall_s: float = 0.3,
                  max_pose_age_s: float = 0.15, telemetry: str | None = None,
                  control_port: int | None = None, start_disarmed: bool = False,
-                 model_name: str = "", log=print, stop=None) -> None:
+                 model_name: str = "", log=print, stop=None,
+                 hold_radius: float | None = None) -> None:
     """Run the loop until Ctrl-C/SIGTERM, or until ``stop`` (an optional threading.Event,
     for tests and embedders) is set. The pose socket is closed on the way out either way;
-    the caller owns the link."""
+    the caller owns the link. ``hold_radius`` (metres) turns on the HoldZone around the
+    evader; None or 0 leaves the policy in charge at every distance."""
     n = loop.policy.num_pursuers
     source = UdpPoseSource(pose_port, expected_pursuers=n)
     tel = Telemetry(telemetry)
     ctl = ControlPort(control_port)
     capture_radius = float(getattr(loop, "capture_radius", 0.0))
+    hold = HoldZone(hold_radius) if hold_radius else None
 
     period = 1.0 / tick_hz
     armed = not start_disarmed
@@ -141,6 +196,9 @@ def run_realtime(loop, link, *, pose_port: int, tick_hz: float = 10.0, stall_s: 
     stall_reason = ""
     log(f"listening for pose frames on UDP :{pose_port}; tick {tick_hz:g} Hz; "
         f"{'DISARMED until `arena go`' if not armed else 'ARMED'} (ctrl-C to stop)")
+    if hold is not None:
+        log(f"HOLD ZONE on: a car within {hold.radius:g} m of the evader stands still (buttons released, "
+            f"still armed); it drives again once the evader is {hold.resume_radius:g} m away")
 
     def send_state_telemetry(now: float) -> None:
         cars = []
@@ -170,6 +228,8 @@ def run_realtime(loop, link, *, pose_port: int, tick_hz: float = 10.0, stall_s: 
                 "pursuers": [[round(p.x, 4), round(p.y, 4), round(p.heading, 4)] for p in last_poses[0]],
                 "evader": [round(last_poses[1].x, 4), round(last_poses[1].y, 4), round(last_poses[1].heading, 4)]},
             "dist": dist, "capture_radius": capture_radius, "cars": cars,
+            "hold_radius": None if hold is None else hold.radius,
+            "hold": None if hold is None else list(hold.held),
             "roles": list(getattr(loop, "roles", None) or []) or None,   # role commanders only
         })
 
@@ -223,6 +283,8 @@ def run_realtime(loop, link, *, pose_port: int, tick_hz: float = 10.0, stall_s: 
                     log(f"POSE FEED STALLED >{stall_s:.1f}s ({stall_reason}) -> E-stop, waiting")
                     estop("stall")
                     loop.reset()          # stale histories would corrupt velocity estimates
+                    if hold is not None:
+                        hold.reset()
                     state, due = "STALLED", None
                     stalls += 1
                 if now - last_tel > 0.25:
@@ -252,6 +314,8 @@ def run_realtime(loop, link, *, pose_port: int, tick_hz: float = 10.0, stall_s: 
             # --- tick ---------------------------------------------------------
             t_inf = time.perf_counter()
             action = loop.tick(pursuer_poses=pursuers, evader_pose=evader)
+            if hold is not None:
+                action = hold.apply(action, pursuers, evader, log)
             t_done = time.perf_counter()
             if link is not None:
                 if armed:

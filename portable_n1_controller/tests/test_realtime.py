@@ -85,8 +85,10 @@ class SerialCar:
 
 
 class Harness:
-    def __init__(self, *, start_disarmed=False, max_pose_age_s=0.15, transport="udp") -> None:
+    def __init__(self, *, start_disarmed=False, max_pose_age_s=0.15, transport="udp",
+                 hold_radius=None) -> None:
         self.transport = transport
+        self.hold_radius = hold_radius
         self.pose_port, self.ctl_port = free_port(), free_port()
         self.car = SerialCar() if transport == "serial" else Car()
         self.loop = PortableLoop(str(ROOT / "models" / "n1_catch"))
@@ -107,15 +109,20 @@ class Harness:
         try:
             run_realtime(self.loop, self.link, pose_port=self.pose_port, control_port=self.ctl_port,
                          start_disarmed=start_disarmed, max_pose_age_s=max_pose_age_s,
-                         log=self.logs.append, stop=self.halt)
+                         log=self.logs.append, stop=self.halt, hold_radius=self.hold_radius)
         except OSError:
             pass
 
-    def frame(self, t: float, lat: float = 0.005, raw: bytes | None = None) -> None:
+    def frame(self, t: float, lat: float = 0.005, raw: bytes | None = None, poses=None) -> None:
+        """``poses`` = ((px, py, heading), (ex, ey, heading)) fixes both vehicles."""
         self.seq += 1
+        if poses is not None:
+            (px, py, ph), (ex, ey, eh) = poses
+            pursuer, evader = {"x": px, "y": py, "heading": ph}, {"x": ex, "y": ey, "heading": eh}
+        else:
+            pursuer, evader = {"x": -0.5 + 0.1 * t, "y": 0.0, "heading": 0.0}, {"x": 0.5, "y": 0.2, "heading": 1.0}
         payload = raw or json.dumps({
-            "t": t, "pursuers": [{"x": -0.5 + 0.1 * t, "y": 0.0, "heading": 0.0}],
-            "evader": {"x": 0.5, "y": 0.2, "heading": 1.0}, "seq": self.seq, "lat": lat}).encode()
+            "t": t, "pursuers": [pursuer], "evader": evader, "seq": self.seq, "lat": lat}).encode()
         self.tx.sendto(payload, ("127.0.0.1", self.pose_port))
 
     def stream(self, seconds: float, fps: float = 30.0, **kw) -> None:
@@ -223,6 +230,41 @@ def test_silence_estops_then_rearms(harness):
     n = len(h.car.packets)
     h.stream(0.5)
     assert driving(h.car.packets[n:]), "did not re-arm when frames resumed"
+
+
+def moves(packets):
+    """Drive packets (not E-stops) that actually ask for motion."""
+    return [p for p in driving(packets) if any(abs(v) > 0.05 for pair in p["cmd"] for v in pair)]
+
+
+def test_hold_zone_stands_still_inside_the_radius_and_follows_the_evader_out(harness):
+    h = harness(hold_radius=0.6)
+    far = ((-0.5, 0.0, 0.0), (0.5, 0.2, 1.0))      # 1.02 m apart, the car faces the evader: the policy drives
+    near = ((0.2, 0.2, 0.0), (0.5, 0.2, 1.0))      # 0.30 m apart: inside the zone
+    h.stream(0.8, poses=far)
+    assert moves(h.car.packets), "outside the zone the policy must drive"
+
+    t_in = time.time()
+    h.stream(0.9, poses=near)
+    time.sleep(0.15)
+    settled = [p for _t, p in h.car.packets if p["t"] > t_in + 0.3]    # past the first tick or two
+    assert len([p for p in settled if not p["estop"]]) >= 3, \
+        "inside the zone the car must stay ARMED and keep getting commands, not E-stops"
+    assert all(p["cmd"] == [[0.0, 0.0]] for p in settled if not p["estop"]), "a held car was commanded to move"
+    assert not any(p["estop"] for p in settled), "a held car must not be E-stopped: it is still active"
+
+    t_out = time.time()
+    h.stream(1.0, poses=far)
+    time.sleep(0.15)
+    assert moves([(0, p) for _t, p in h.car.packets if p["t"] > t_out + 0.3]), \
+        "the car did not drive again once the evader was out of the zone"
+    assert any("HOLD:" in line for line in h.logs) and any("RESUME" in line for line in h.logs)
+
+
+def test_hold_zone_is_off_unless_asked_for(harness):
+    h = harness()
+    h.stream(0.9, poses=((0.2, 0.2, 0.0), (0.5, 0.2, 1.0)))
+    assert not any("HOLD" in line for line in h.logs)
 
 
 def test_malformed_frames_are_skipped_not_fatal(harness):

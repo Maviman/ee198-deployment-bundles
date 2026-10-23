@@ -42,8 +42,10 @@ Examples (any Python 3.10+ with `pip install -r requirements.txt`):
 from __future__ import annotations
 
 import argparse
+import os
 import signal
 import time
+from pathlib import Path
 
 from single_pursuer.env import DT, SinglePursuerEnv
 from controller_runtime.pose_types import VehiclePose
@@ -140,6 +142,30 @@ def run_udp_legacy(loop: PortableLoop, link: EspLink | None, *, pose_port: int) 
         source.close()
 
 
+HOLD_RADIUS_FILE = Path.home() / ".arena" / "hold_radius"
+
+
+def default_hold_radius(environ=None, path: Path | None = None) -> tuple[float | None, str]:
+    """(radius, where it came from) for --hold-radius when the flag is absent: the
+    ARENA_HOLD_RADIUS environment variable, else the first line of ~/.arena/hold_radius,
+    else (None, ""). Raises ValueError, naming the source, on text that is not a number."""
+    environ = os.environ if environ is None else environ
+    path = HOLD_RADIUS_FILE if path is None else path
+    if environ.get("ARENA_HOLD_RADIUS"):
+        src, raw = "ARENA_HOLD_RADIUS", environ["ARENA_HOLD_RADIUS"]
+    elif path.is_file():
+        lines = path.read_text(encoding="utf-8").strip().splitlines()
+        src, raw = str(path), lines[0] if lines else ""
+        if not raw.strip():
+            return None, ""
+    else:
+        return None, ""
+    try:
+        return float(raw), src
+    except ValueError:
+        raise ValueError(f"{src} must hold a number of metres, got {raw!r}") from None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--model", default="models/n1_catch", help="model dir (models/n1_catch or models/n1_pin)")
@@ -172,7 +198,27 @@ def main() -> None:
                     help="send E-stop to every car until an operator arms")
     rt.add_argument("--legacy-loop", action="store_true",
                     help="the original tick-per-frame loop, for A/B comparison")
+    rt.add_argument("--hold-radius", type=float, default=None, metavar="M",
+                    help="stand-still zone around the evader, metres. A car within M of it gets [0, 0] "
+                         "(every button released) but stays ARMED and keeps tracking; it drives again "
+                         "once the evader is M + 0.1 m away. Not an E-stop, not a capture: nothing ends. "
+                         "Default: the ARENA_HOLD_RADIUS environment variable, else the number in "
+                         "~/.arena/hold_radius (so a plain `arena up` keeps it), else off (0 = off)")
     args = parser.parse_args()
+    explicit_hold = args.hold_radius is not None
+    hold_src = "--hold-radius"
+    if not explicit_hold:
+        try:
+            args.hold_radius, hold_src = default_hold_radius()
+        except ValueError as exc:
+            parser.error(str(exc))
+    if args.hold_radius is not None and args.hold_radius < 0:
+        parser.error(f"{hold_src} must be >= 0 metres (0 = off)")
+    if args.hold_radius and (args.source != "udp" or args.legacy_loop):
+        if explicit_hold:
+            parser.error("--hold-radius applies only to the real-time loop (--source udp, not --legacy-loop)")
+        print(f"note: the hold radius from {hold_src} is ignored outside the real-time loop (--source udp)")
+        args.hold_radius = None
     # The arm switch, the pose-age gate and telemetry exist only in the real-time
     # loop. Accepting them anywhere else would mean a "disarmed" start that drives
     # the cars on the first frame, and a STOP that nothing is listening for.
@@ -261,7 +307,7 @@ def main() -> None:
             run_realtime(loop, link, pose_port=args.pose_port, tick_hz=args.tick_hz,
                          max_pose_age_s=args.max_pose_age, telemetry=args.telemetry,
                          control_port=args.control_port, start_disarmed=args.start_disarmed,
-                         model_name=args.model,
+                         model_name=args.model, hold_radius=args.hold_radius or None,
                          log=lambda m: print(f"[control {time.strftime('%H:%M:%S')}] {m}", flush=True))
     finally:
         if link is not None:

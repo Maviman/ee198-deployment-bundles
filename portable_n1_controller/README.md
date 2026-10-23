@@ -107,6 +107,24 @@ python run_controller.py --model models/n1_catch --source udp --pose-port 9870 -
 Dead-man stop is built in: if the pose feed stalls >0.3 s, an E-stop goes out
 and histories reset until frames resume.
 
+**Hold zone (`--hold-radius M`, env `ARENA_HOLD_RADIUS=M`, or the number in `~/.arena/hold_radius`, which a plain `arena up` keeps).** The policy only
+*reports* a capture radius; nothing in the controller ends a run when a car gets
+there, so a car drives on and can overshoot the evader. With a hold zone, a car
+within `M` metres of the evader is commanded `[0, 0]` (every button released)
+while staying armed, so this is **not** an E-stop and **not** a capture: the link
+and the firmware's dead-man keep being fed, poses keep being tracked and the
+policy is still asked on every tick. The car drives again once the evader is
+`M + 0.1` m away (the 0.1 m is hysteresis against pose noise), so it follows an
+evader that moves off. Each car is judged on its own distance. The log says
+`car 0 HOLD ...` and `car 0 RESUME ...` once per change, and the telemetry
+carries `hold_radius` and `hold`. Size `M` for the run-on: an on/off car keeps
+rolling after the buttons release (about 0.4 s measured on the V3 car, around
+0.5 m at its 1.4 m/s), so the car stops `M` minus that from the evader. The
+policy was trained to end an episode at its capture radius (0.9 m for `n1_catch`),
+so a smaller `M` lets it drive in a region it never saw; it is only overridden
+once it gets inside `M`. A model with an action history (k > 0) still records
+its own un-held output there. Not available with `--legacy-loop` or `--source sim`.
+
 The `--source udp` loop (`pc_controller/realtime.py`) is frame-synchronous:
 perception sends every camera frame, and the controller acts on the one nearest
 each 100 ms tick the moment it arrives. It never acts on a pose whose

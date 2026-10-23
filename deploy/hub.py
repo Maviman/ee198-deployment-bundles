@@ -11,19 +11,40 @@ never slow a pose frame or a command.
     GET  /api/state        everything, as JSON (the terminal monitor polls this)
     GET  /video.mjpg       the camera, proxied from the vision Orin (one upstream
                            connection however many people are watching)
-    POST /api/stop         disarm: every car gets E-stop on the next packet
-                           (there is deliberately no arm endpoint; arming is
-                           `arena go` from a terminal on the control Orin)
+    POST /api/stop         disarm: every car gets E-stop on the next packet.
+                           Open to anyone who can reach the page: stopping is
+                           always safe.
+    POST /api/arm          ARM (the dashboard's START). Deliberately narrow, because
+    POST /api/init         arming used to be `arena go` from a terminal only and this
+                           page listens on the whole network:
+                             - only a browser ON THIS MACHINE (the control Orin) is
+                               served; anyone else gets 403 (STOP stays open to all);
+                             - the request must carry `X-Arena: control`, which a
+                               hostile web page cannot add without a CORS preflight
+                               this server never answers, and a foreign Origin is refused;
+                             - /api/arm re-checks readiness HERE (see readiness()), and
+                               refuses unless everything is green;
+                             - an armed run has a watchdog (run_watchdog): it disarms on
+                               its own at the time cap, when the car leaves the arena, or
+                               when the pose feed is lost, so a lost car cannot resume
+                               driving by itself when it reappears.
+                           /api/init runs `<--arena-cli> up`: starts whatever is not
+                           running and leaves the cars DISARMED.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import math
+import os
+import re
 import socket
+import subprocess
 import threading
 import time
 import urllib.request
+from urllib.parse import urlparse
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -39,6 +60,50 @@ WARN_DRIFT_PX = 8.0
 WARN_RTT_MS = 40.0
 WARN_RSSI = -75
 WARN_TEMP_C = 85.0
+READY_ACK_S = 0.5            # a car's last ACK must be this fresh to arm
+READY_VIS_PCT = 90.0         # a tag must be seen in this share of recent frames to arm
+START_MARGIN_M = 0.065       # the car must start this far inside the arena edge
+EDGE_FACING_M = 0.70         # beyond this radius the car must face inward to arm
+ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def find_arena_cli() -> str:
+    """The `arena` script whose site config (deploy/arena.local.conf) this deployment uses:
+    the checkout this hub runs from or, when that is a git worktree, the checkout that owns
+    the worktree. Empty when neither has one (the INITIALIZE button is then off)."""
+    roots = [HERE.parent]
+    try:
+        common = subprocess.run(["git", "-C", str(HERE), "rev-parse", "--path-format=absolute",
+                                 "--git-common-dir"], capture_output=True, text=True, timeout=5).stdout.strip()
+        if common:
+            roots.append(Path(common).parent)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    for root in roots:
+        if (root / "arena").is_file() and (root / "deploy" / "arena.local.conf").is_file():
+            return str(root / "arena")
+    return ""
+
+
+def is_local(addr: str) -> bool:
+    """True when ``addr`` is an address of THIS machine (loopback or one of its own
+    IPs): you cannot bind a socket to an address that is not yours."""
+    ip = addr.split("%")[0]
+    if ip.startswith("::ffff:"):
+        ip = ip[7:]
+    if ip.startswith("127.") or ip == "::1":
+        return True
+    try:
+        s = socket.socket(socket.AF_INET6 if ":" in ip else socket.AF_INET, socket.SOCK_DGRAM)
+    except OSError:
+        return False
+    try:
+        s.bind((ip, 0))
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
 
 
 class Hub:
@@ -64,6 +129,17 @@ class Hub:
         self.jpeg_cond = threading.Condition()
         self.viewers = 0
         self._proxy_thread: threading.Thread | None = None
+        # operator-started runs (the dashboard's START): see readiness() / run_watchdog()
+        self.run = {"armed_at": None, "cap_s": float(getattr(args, "run_cap_s", 120.0)),
+                    "halt_reason": None, "halt_at": None}
+        self._watch_gen = 0
+        # the dashboard's INITIALIZE: one `arena up` at a time
+        self.init_lock = threading.Lock()
+        self.init_job = {"running": False, "started": None, "finished": None, "ok": None,
+                         "rc": None, "lines": []}
+
+    def event(self, text: str) -> None:
+        self.events.append((time.strftime("%H:%M:%S"), text))
 
     # ------------------------------------------------------------- telemetry
     def ingest(self, msg: dict) -> None:
@@ -191,9 +267,13 @@ class Hub:
                         add("error", f"car {car['idx']} finds no command at its CAR_INDEX")
         return out
 
-    def state(self) -> dict:
+    def state(self, client_local: bool = False) -> dict:
         now = time.time()
         with self.lock:
+            ready = self.readiness()
+            run = dict(self.run)
+            run["remaining_s"] = (None if run["armed_at"] is None
+                                  else max(0.0, round(run["cap_s"] - (now - run["armed_at"]), 1)))
             return {
                 "now": now, "hub_up_s": round(now - self.started),
                 "vision": self.latest.get("vision"), "control": self.latest.get("control"),
@@ -204,20 +284,185 @@ class Hub:
                 "events": list(self.events)[-12:],
                 "run_dir": str(self.run_dir),
                 "preview": bool(self.args.preview),
+                # the START / INITIALIZE buttons: who may press them, and whether they would work
+                "can_control": bool(client_local),
+                "can_init": bool(getattr(self.args, "arena_cli", "")),
+                "ready": ready, "run": run, "init": dict(self.init_job, lines=self.init_job["lines"][-14:]),
             }
 
     # ---------------------------------------------------------------- control
-    def disarm(self) -> dict:
+    def _ctl(self, cmd: str) -> dict:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.settimeout(1.0)
         try:
-            s.sendto(b'{"cmd":"disarm"}', ("127.0.0.1", self.args.control_port))
+            s.sendto(json.dumps({"cmd": cmd}).encode("utf-8"), ("127.0.0.1", self.args.control_port))
             return json.loads(s.recvfrom(1024)[0].decode("utf-8"))
         except (OSError, ValueError) as exc:
             return {"error": f"controller did not answer ({exc}); if it is not running the "
                              "cars are already in failsafe"}
         finally:
             s.close()
+
+    def disarm(self) -> dict:
+        return self._ctl("disarm")
+
+    def readiness(self) -> dict:
+        """Everything that must be true before a START is accepted. Judged here, from the
+        live telemetry, so the page cannot talk the hub into arming a system that is not
+        ready (the button merely mirrors this). Caller holds self.lock or is single-threaded."""
+        now = time.time()
+        checks: list[dict] = []
+
+        def chk(name, ok, detail=""):
+            checks.append({"name": name, "ok": bool(ok), "detail": detail})
+
+        c, v = self.latest.get("control"), self.latest.get("vision")
+        c_age = now - self.rx_at.get("control", 0)
+        v_age = now - self.rx_at.get("vision", 0)
+        c_ok = c is not None and c_age < 1.0
+        v_ok = v is not None and v_age < 1.0
+        chk("controller telemetry is live", c_ok, "" if c_ok else "no controller telemetry (run INITIALIZE)")
+        chk("camera service is live", v_ok and v.get("status") == "streaming",
+            "" if v_ok else "no vision telemetry (run INITIALIZE)")
+        armed = bool(c and c.get("armed"))
+        chk("controller is RUNNING and disarmed", c_ok and c.get("state") == "RUNNING" and not armed,
+            "" if not c_ok else f"{c.get('state')}{' (armed)' if armed else ''}"
+            + (f": {c.get('stall_reason')}" if c.get("state") == "STALLED" else ""))
+        seen_ok, seen_txt = False, "no vision data"
+        if v_ok:
+            veh = v.get("vehicles") or []
+            bad = []
+            for x in veh:
+                if not x.get("seen"):
+                    bad.append(x["role"] + " not seen")
+                elif x.get("vis", 100) < READY_VIS_PCT:
+                    bad.append("%s seen in only %.0f%% of frames" % (x["role"], x.get("vis", 0)))
+            seen_ok, seen_txt = bool(veh) and not bad, ", ".join(bad)
+        chk("car and evader both seen", seen_ok, seen_txt)
+        cars = (c or {}).get("cars") or []
+        bad_cars = [f"car {x['idx']}" for x in cars
+                    if x.get("ack_age_s") is None or x["ack_age_s"] > READY_ACK_S or x.get("slot") is False]
+        chk("every car link is answering", c_ok and bool(cars) and not bad_cars,
+            ", ".join(bad_cars) + " silent" if bad_cars else ("" if cars else "no cars linked"))
+        p95 = (((c or {}).get("lat_ms") or {}).get("total") or {}).get("p95")
+        chk("camera to command latency within budget", p95 is not None and p95 < BUDGET_TOTAL_MS,
+            "" if p95 is None else f"p95 {p95:.0f} ms of {BUDGET_TOTAL_MS:.0f}")
+        errs = [a["text"] for a in self.alerts() if a["level"] == "error"]
+        chk("no error alerts", not errs, "; ".join(errs[:3]))
+
+        poses = (c or {}).get("poses")
+        if c_ok and poses and poses.get("pursuers"):
+            px, py, h = poses["pursuers"][0]
+            ex, ey = poses["evader"][0], poses["evader"][1]
+            hw, hh = ((v or {}).get("arena") or [0.915, 0.915])[:2]
+            inside = abs(px) < hw - START_MARGIN_M and abs(py) < hh - START_MARGIN_M
+            chk("car starts inside the arena", inside, f"at ({px:.2f}, {py:.2f})")
+            near_edge = max(abs(px), abs(py)) >= EDGE_FACING_M
+            inward = (px * math.cos(h) + py * math.sin(h)) < 0
+            chk("car faces inward if it starts near an edge", (not near_edge) or inward,
+                "" if not near_edge or inward else f"at ({px:.2f}, {py:.2f}) facing outward")
+            cmd = c.get("cmd") or [0.0, 0.0]
+            ang = (math.atan2(ey - py, ex - px) - h + math.pi) % (2 * math.pi) - math.pi
+            ok_sign = abs(ang) < math.radians(30) or abs(cmd[1]) < 0.2 or ((cmd[1] > 0) == (ang > 0))
+            chk("steering sign agrees with the evader's side (frame not mirrored)", ok_sign,
+                "" if ok_sign else f"evader is {abs(math.degrees(ang)):.0f} deg to the "
+                                   f"{'left' if ang > 0 else 'right'} but the policy steers "
+                                   f"{'left' if cmd[1] > 0 else 'right'}: mirrored calibration?")
+        else:
+            chk("car and evader poses are flowing", False, "no poses yet")
+        return {"ok": all(x["ok"] for x in checks), "checks": checks,
+                "hold_radius": (c or {}).get("hold_radius")}
+
+    def arm(self) -> tuple[int, dict]:
+        """START: arm only if readiness() is green, then watch the run."""
+        with self.lock:
+            r = self.readiness()
+        if not r["ok"]:
+            return 409, {"error": "not ready: " + "; ".join(
+                f"{x['name']}" + (f" ({x['detail']})" if x["detail"] else "") for x in r["checks"] if not x["ok"]),
+                "checks": r["checks"]}
+        reply = self._ctl("arm")
+        if reply.get("armed") is not True:
+            return 502, {"error": reply.get("error") or f"controller did not arm: {reply}"}
+        self.run.update(armed_at=time.time(), halt_reason=None, halt_at=None)
+        self._watch_gen += 1
+        threading.Thread(target=self.run_watchdog, args=(self._watch_gen,), daemon=True).start()
+        self.event(f"START pressed: ARMED, auto-stop after {self.run['cap_s']:g} s")
+        return 200, reply
+
+    def run_watchdog(self, gen: int) -> None:
+        """Supervises one operator-started run and disarms on its own: at the time cap, when
+        the car leaves the arena, or when the pose feed is lost (the controller has already
+        E-stopped; it would resume driving by itself when poses return, which for a car that
+        was lost is not what an operator expects, so the run ends instead)."""
+        t0, bad_since, reason = time.time(), None, None
+        while gen == self._watch_gen:
+            time.sleep(0.1)
+            now = time.time()
+            c, v = self.latest.get("control"), self.latest.get("vision")
+            if c is None or now - self.rx_at.get("control", 0) > 1.0:
+                reason = "controller telemetry lost"
+            elif now - t0 >= self.run["cap_s"]:
+                reason = f"time cap reached ({self.run['cap_s']:g} s)"
+            elif not c.get("armed"):
+                if now - t0 > 1.5:                       # telemetry lags the arm by a tick or two
+                    self.run.update(armed_at=None, halt_reason="disarmed (STOP / arena halt)", halt_at=now)
+                    self.event("run ended: disarmed (STOP / arena halt)")
+                    return
+            else:
+                poses = c.get("poses") or {}
+                hw, hh = ((v or {}).get("arena") or [0.915, 0.915])[:2]
+                for q in poses.get("pursuers") or []:
+                    if abs(q[0]) > hw + 0.005 or abs(q[1]) > hh + 0.005:
+                        reason = f"car left the arena ({q[0]:.2f}, {q[1]:.2f})"
+                if c.get("state") != "RUNNING":
+                    bad_since = bad_since or now
+                    if now - bad_since > 1.0:
+                        reason = f"pose feed lost ({c.get('stall_reason') or c.get('state')})"
+                else:
+                    bad_since = None
+            if reason:
+                self.disarm(); self.disarm(); self.disarm()
+                self.run.update(armed_at=None, halt_reason=reason, halt_at=time.time())
+                self.event(f"run ended, DISARMED: {reason}")
+                return
+
+    def initialize(self) -> tuple[int, dict]:
+        """INITIALIZE: `<arena-cli> up`. Starts what is not running, leaves the cars DISARMED."""
+        cli = getattr(self.args, "arena_cli", "")
+        if not cli:
+            return 501, {"error": "this hub was started without --arena-cli (or ARENA_CLI): "
+                                  "run `./arena up` in a terminal instead"}
+        c = self.latest.get("control")
+        if c and c.get("armed") and time.time() - self.rx_at.get("control", 0) < 2.0:
+            return 409, {"error": "the car is ARMED: press STOP first"}
+        with self.init_lock:
+            if self.init_job["running"]:
+                return 409, {"error": "initialization is already running"}
+            self.init_job.update(running=True, started=time.time(), finished=None, ok=None, rc=None, lines=[])
+        threading.Thread(target=self._init_job, args=(cli,), daemon=True).start()
+        self.event("INITIALIZE pressed: arena up")
+        return 200, {"started": True}
+
+    def _init_job(self, cli: str) -> None:
+        rc, deadline = None, time.time() + 150
+        try:
+            p = subprocess.Popen([cli, "up"], cwd=os.path.dirname(os.path.abspath(cli)) or None,
+                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace")
+            for line in p.stdout:
+                line = ANSI.sub("", line).rstrip()
+                if line:
+                    self.init_job["lines"].append(line[:200])
+                    del self.init_job["lines"][:-60]
+                if time.time() > deadline:
+                    p.kill()
+                    self.init_job["lines"].append("(killed: took longer than 150 s)")
+                    break
+            rc = p.wait(timeout=10)
+        except (OSError, subprocess.SubprocessError) as exc:
+            self.init_job["lines"].append(f"could not run {cli}: {exc}")
+        self.init_job.update(running=False, finished=time.time(), rc=rc, ok=(rc == 0))
+        self.event("INITIALIZE finished: " + ("ok" if rc == 0 else f"needs attention (exit {rc})"))
 
     # ------------------------------------------------------------ video proxy
     def _proxy(self) -> None:
@@ -274,11 +519,26 @@ def make_handler(hub: Hub):
             self.end_headers()
             self.wfile.write(body)
 
+        def _json(self, code, obj):
+            self._send(code, json.dumps(obj).encode("utf-8"), "application/json")
+
+        def _may_control(self) -> str | None:
+            """None when this request may arm/initialize, else the reason it may not."""
+            if not is_local(self.client_address[0]):
+                return ("START and INITIALIZE only work from a browser on the control Orin itself "
+                        "(STOP works from anywhere)")
+            if self.headers.get("X-Arena") != "control":
+                return "missing X-Arena header (use the dashboard's buttons)"
+            origin = self.headers.get("Origin")
+            if origin and urlparse(origin).netloc != self.headers.get("Host"):
+                return "cross-origin request refused"
+            return None
+
         def do_GET(self):
             if self.path in ("/", "/index.html"):
                 self._send(200, page, "text/html; charset=utf-8")
             elif self.path.startswith("/api/state"):
-                self._send(200, json.dumps(hub.state()).encode("utf-8"), "application/json")
+                self._json(200, hub.state(client_local=is_local(self.client_address[0])))
             elif self.path.startswith("/video.mjpg"):
                 self._stream()
             else:
@@ -286,7 +546,15 @@ def make_handler(hub: Hub):
 
         def do_POST(self):
             if self.path.startswith("/api/stop"):
-                self._send(200, json.dumps(hub.disarm()).encode("utf-8"), "application/json")
+                self._json(200, hub.disarm())
+            elif self.path.startswith("/api/arm") or self.path.startswith("/api/init"):
+                why = self._may_control()
+                if why:
+                    self._json(403, {"error": why})
+                elif self.path.startswith("/api/arm"):
+                    self._json(*hub.arm())
+                else:
+                    self._json(*hub.initialize())
             else:
                 self._send(404, b"not found", "text/plain")
 
@@ -327,7 +595,16 @@ def main() -> None:
     ap.add_argument("--control-port", type=int, default=9872, help="the controller's localhost arm/disarm port")
     ap.add_argument("--preview", default="", help="vision preview base URL, e.g. http://10.42.0.1:8090")
     ap.add_argument("--run-dir", default="~/.arena/runs")
+    ap.add_argument("--arena-cli", default=os.environ.get("ARENA_CLI", ""),
+                    help="path to the `arena` script; enables the INITIALIZE button (runs `arena up`). "
+                         "Default: the ARENA_CLI environment variable, else the `arena` of the checkout "
+                         "that has a deploy/arena.local.conf (this one, or the one owning this git "
+                         "worktree), else the button is off")
+    ap.add_argument("--run-cap-s", type=float, default=float(os.environ.get("ARENA_RUN_CAP_S", "120")),
+                    help="a run started from the dashboard disarms itself after this many seconds "
+                         "(default 120, or ARENA_RUN_CAP_S)")
     args = ap.parse_args()
+    args.arena_cli = args.arena_cli or find_arena_cli()
     hub = Hub(args)
     threading.Thread(target=hub.udp_loop, daemon=True).start()
     httpd = ThreadingHTTPServer(("0.0.0.0", args.port), make_handler(hub))

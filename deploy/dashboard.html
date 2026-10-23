@@ -345,7 +345,8 @@ function render() {
          : c ? " Hold zone is OFF: the car keeps driving at any distance from the evader." : "")
       + (canCtl ? "" : " START, INITIALIZE and CALIBRATE only work from a browser on the control Orin; STOP works from anywhere.");
   $("initlog").textContent = job.started
-    ? (job.running ? jobLabel + " running…\n" : job.ok ? jobLabel + " finished: ok\n" : jobLabel + " finished: NEEDS ATTENTION (exit " + job.rc + ")\n") + (job.lines || []).join("\n")
+    ? (job.running ? jobLabel + " running…\n" : job.ok ? jobLabel + " finished: ok\n" : jobLabel + " finished: NEEDS ATTENTION (exit " + job.rc + ")\n")
+      + ((job.summary || []).length ? job.summary.join("\n") + "\n\nlog:\n" : "") + (job.lines || []).join("\n")
     : "";
   if (S.scan_png) {
     const src = "/api/scan.png?" + S.scan_png;

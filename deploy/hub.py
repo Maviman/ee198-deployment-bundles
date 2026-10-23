@@ -140,7 +140,7 @@ class Hub:
         # time, since both take the camera; "kind" says which is in the slot
         self.init_lock = threading.Lock()
         self.init_job = {"kind": None, "running": False, "started": None, "finished": None, "ok": None,
-                         "rc": None, "lines": []}
+                         "rc": None, "lines": [], "summary": []}
         # where `arena scan` leaves its annotated snapshot: copied next to the arena CLI when
         # the camera is on the other Orin, written to ~/.arena/scan when it is on this one
         cli = getattr(args, "arena_cli", "")
@@ -467,20 +467,20 @@ class Hub:
                 busy = self.JOBS[self.init_job["kind"]][0]
                 return 409, {"error": f"{busy} is already running"}
             self.init_job.update(kind=kind, running=True, started=time.time(), finished=None,
-                                 ok=None, rc=None, lines=[])
+                                 ok=None, rc=None, lines=[], summary=[])
         threading.Thread(target=self._run_job, args=(cli, kind), daemon=True).start()
         self.event(f"{label} pressed: " + " then ".join(f"arena {s[0]}" for s in self.JOBS[kind][1]))
         return 200, {"started": True}
 
     def _run_job(self, cli: str, kind: str) -> None:
         label, steps = self.JOBS[kind]
-        lines, first_bad = self.init_job["lines"], 0
+        lines, summary, first_bad = self.init_job["lines"], self.init_job["summary"], 0
         for i, (sub, limit, always) in enumerate(steps):
             if first_bad != 0 and not always:
                 break
             if i:
                 lines.append(f"--- arena {sub} ---")
-            rc, deadline = None, time.time() + limit
+            rc, deadline, key = None, time.time() + limit, []
             try:
                 # stdin closed: `arena scan` uses `ssh -t`, which must never wait for a keyboard
                 p = subprocess.Popen([cli, sub], cwd=os.path.dirname(os.path.abspath(cli)) or None,
@@ -491,6 +491,8 @@ class Hub:
                     if line and not line.startswith("Pseudo-terminal will not be allocated"):
                         lines.append(line[:200])
                         del lines[:-80]
+                        if line.lstrip().startswith(("[FAIL]", "[WARN]")) or "giving up" in line:
+                            key.append(line.strip()[:200])
                     if time.time() > deadline:
                         p.kill()
                         lines.append(f"(killed: arena {sub} took longer than {limit} s)")
@@ -498,6 +500,9 @@ class Hub:
                 rc = p.wait(timeout=10)
             except (OSError, subprocess.SubprocessError) as exc:
                 lines.append(f"could not run {cli}: {exc}")
+            # the verdict of each step and what it flagged: the log scrolls, this stays
+            summary.append(f"arena {sub}: " + ("ok" if rc == 0 else f"FAILED (exit {rc})"))
+            summary.extend("  " + k for k in key[:12])
             if rc != 0 and first_bad == 0:
                 first_bad = rc
         rc = first_bad

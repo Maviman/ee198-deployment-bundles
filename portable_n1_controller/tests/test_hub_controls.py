@@ -289,6 +289,21 @@ def test_a_failed_calibration_says_so_but_brings_the_camera_back_to_fix_tags_by(
     assert job["lines"] == ["SCAN FAILED: tag 11 not seen", "--- arena up ---", "arena up"]
 
 
+def test_the_scans_verdict_stays_visible_after_arena_up_scrolls_the_log(rig, tmp_path):
+    body = ('[ "$1" = scan ] && { echo "  [ ok ] tag 10 (corner): seen 100%"; '
+            'echo "  [WARN] tag 11 (corner): seen 47% of frames, 19.2 px"; '
+            'echo "  [FAIL] calibration: need 4 corner tags"; exit 1; }\n'
+            'i=0; while [ $i -lt 100 ]; do echo "up line $i"; i=$((i+1)); done\n')
+    r = rig(arena_cli=script(tmp_path, body))
+    assert r.post("/api/scan")[0] == 200
+    job = wait_job(r)
+    assert not any("[FAIL]" in l for l in job["lines"]), "the log tail is all `arena up` by now"
+    assert job["summary"] == ["arena scan: FAILED (exit 1)",
+                              "  [WARN] tag 11 (corner): seen 47% of frames, 19.2 px",
+                              "  [FAIL] calibration: need 4 corner tags",
+                              "arena up: ok"]
+
+
 def test_initialize_does_not_retry_after_its_own_failure(rig, tmp_path):
     r = rig(arena_cli=script(tmp_path, 'echo "arena $1"; exit 3\n'))
     assert r.post("/api/init")[0] == 200

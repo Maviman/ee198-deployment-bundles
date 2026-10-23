@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import socket
 import stat
 import threading
@@ -259,3 +260,68 @@ def test_initialize_refuses_while_armed_or_already_running_or_unconfigured(rig, 
     code, body = r.post("/api/init")
     assert code == 409 and "ARMED" in body["error"], "never restart services under a driving car"
     assert rig().post("/api/init")[0] == 501, "no --arena-cli: the button must say so, not guess"
+
+
+def wait_job(r, limit=6.0):
+    t0 = time.time()
+    while time.time() - t0 < limit:
+        job = r.state()["init"]
+        if not job["running"]:
+            return job
+        time.sleep(0.1)
+    raise AssertionError("job never finished")
+
+
+def test_calibrate_scans_then_brings_the_camera_service_back(rig, tmp_path):
+    r = rig(arena_cli=script(tmp_path, 'echo "arena $1"; exit 0\n'))
+    assert r.post("/api/scan") == (200, {"started": True})
+    job = wait_job(r)
+    assert job["kind"] == "scan" and job["ok"] is True
+    assert job["lines"] == ["arena scan", "--- arena up ---", "arena up"]
+
+
+def test_a_failed_calibration_says_so_and_does_not_restart_on_the_old_frame(rig, tmp_path):
+    r = rig(arena_cli=script(tmp_path, '[ "$1" = scan ] && { echo "SCAN FAILED: tag 13 not seen"; exit 1; }\n'
+                                       'echo "arena $1"\n'))
+    assert r.post("/api/scan")[0] == 200
+    job = wait_job(r)
+    assert job["ok"] is False and job["rc"] == 1
+    assert job["lines"] == ["SCAN FAILED: tag 13 not seen"], "no `arena up` after a failed scan"
+
+
+def test_calibrate_shares_one_slot_with_initialize_and_refuses_while_armed(rig, tmp_path):
+    r = rig(arena_cli=script(tmp_path, "sleep 1.2\n"))
+    assert r.post("/api/init")[0] == 200
+    code, body = r.post("/api/scan")
+    assert code == 409 and "INITIALIZE is already running" in body["error"], "both take the camera"
+    wait_job(r)
+    assert r.post("/api/arm")[0] == 200
+    time.sleep(0.4)
+    code, body = r.post("/api/scan")
+    assert code == 409 and "ARMED" in body["error"]
+    assert rig().post("/api/scan")[0] == 501, "no --arena-cli: the button must say so, not guess"
+
+
+def test_only_the_control_orin_may_calibrate(rig, tmp_path, monkeypatch):
+    r = rig(arena_cli=script(tmp_path, "exit 0\n"))
+    assert r.post("/api/scan", headers={})[0] == 403, "needs the dashboard's header"
+    monkeypatch.setattr(hubmod, "is_local", lambda addr: False)
+    assert r.post("/api/scan")[0] == 403
+    assert r.state()["init"]["started"] is None
+
+
+def test_the_latest_scan_snapshot_is_served(rig, tmp_path):
+    r = rig()
+    old, new = tmp_path / "old.png", tmp_path / "new.png"
+    r.hub.scan_pngs = [old, new]
+    assert r.state()["scan_png"] is None
+    with pytest.raises(urllib.error.HTTPError) as e:
+        urllib.request.urlopen(r.base + "/api/scan.png", timeout=5)
+    assert e.value.code == 404
+    old.write_bytes(b"\x89PNG old")
+    new.write_bytes(b"\x89PNG new")
+    t = time.time()
+    os.utime(old, (t - 60, t - 60))
+    with urllib.request.urlopen(r.base + "/api/scan.png", timeout=5) as resp:
+        assert resp.read() == b"\x89PNG new" and resp.headers["Content-Type"] == "image/png"
+    assert r.state()["scan_png"] == pytest.approx(new.stat().st_mtime)

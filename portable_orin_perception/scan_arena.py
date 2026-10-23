@@ -84,6 +84,54 @@ def grab(source, n: int, timeout: float = 3.0):
     return out
 
 
+CORNER_NAMES = {(-1, 1): "top-left", (1, 1): "top-right", (1, -1): "bottom-right", (-1, -1): "bottom-left"}
+SIZE_WARN_FRAC = 0.15        # corner tags measuring this far off their printed size: scale is suspect
+
+
+def _quadrants(pts: dict, y_down: bool, margin: float = 0.2) -> dict | None:
+    """Quadrant (sx, sy) of each point about the group's centroid, +y up; None when two
+    points share a quadrant or one sits too near an axis to call (e.g. camera at ~45 deg)."""
+    c = np.mean(np.array(list(pts.values()), dtype=float), axis=0)
+    off = {k: np.asarray(p, dtype=float) - c for k, p in pts.items()}
+    if y_down:
+        off = {k: np.array([o[0], -o[1]]) for k, o in off.items()}
+    r = float(np.median([np.linalg.norm(o) for o in off.values()]))
+    if r <= 0 or any(min(abs(o[0]), abs(o[1])) < margin * r for o in off.values()):
+        return None
+    q = {k: (1 if o[0] > 0 else -1, 1 if o[1] > 0 else -1) for k, o in off.items()}
+    return q if len(set(q.values())) == len(q) else None
+
+
+def match_layout(centers_px: dict, points: dict) -> tuple[dict | None, str]:
+    """Which configured corner position belongs to which seen corner tag.
+
+    A 4-point homography fits ANY assignment exactly (a 0.00 cm residual), so a tag
+    taped in the wrong corner silently gives a mirrored or twisted arena frame: the
+    policy then steers away from the evader. arena_test_6ft.yaml describes the layout
+    "as seen from the camera, +y up", so the positions are matched to the tags by
+    where the camera SEES them (image right = +x, image up = +y) instead of trusting
+    the ids. Returns ({tag id: position}, message): the config unchanged and "" when it
+    agrees; the positions re-assigned and a message naming the moved tags when it does
+    not; None and the reason when the layout cannot be told apart.
+    """
+    seen_q = _quadrants(centers_px, y_down=True)
+    conf_q = _quadrants(points, y_down=False)
+    if seen_q is None:
+        return None, ("cannot tell which corner each tag is in (camera rotated near 45 deg, "
+                      "or two tags in one corner)")
+    if conf_q is None or set(conf_q) != set(seen_q):
+        return None, "calibration_points do not put one tag in each corner"
+    by_quadrant = {q: points[k] for k, q in conf_q.items()}
+    matched = {k: by_quadrant[q] for k, q in seen_q.items()}
+    moved = [k for k in sorted(seen_q) if seen_q[k] != conf_q[k]]
+    if not moved:
+        return matched, ""
+    return matched, ("corner tags are not where arena_test_6ft.yaml puts them: "
+                     + ", ".join(f"tag {k} is {CORNER_NAMES[seen_q[k]]} (config: {CORNER_NAMES[conf_q[k]]})"
+                                 for k in moved)
+                     + ". Calibrated with the layout the camera sees")
+
+
 def main(argv=None) -> int:
     import cv2
     import yaml
@@ -259,12 +307,19 @@ def main(argv=None) -> int:
                         + ("" if worst <= args.drift_warn_px else ": camera or tags moved, re-run `arena scan`"))
     else:
         missing = [c for c in corner_ids if c not in centers]
+        layout, why = None, ""
         if len(centers) < 4:
             rep.add(FAIL, "calibration", f"need 4 corner tags, reliably seen: {sorted(centers)}; "
                     f"missing {missing}. Check placement, focus and light")
         else:
+            layout, why = match_layout(centers, {c: points[c] for c in centers})
+            if layout is None:
+                rep.add(FAIL, "layout", why + ". Put one corner tag in each corner of the arena")
+        if layout is not None:
+            if why:
+                rep.add(WARN, "layout", why)
             px = marker_math.undistort_points(np.vstack([centers[c] for c in centers]), K, D)
-            arena_pts = np.array([points[c] for c in centers])
+            arena_pts = np.array([layout[c] for c in centers])
             H, residuals = arena_frame.fit_homography(px, arena_pts)
             worst = float(residuals.max())
             for c, r in zip(centers, residuals):
@@ -273,13 +328,30 @@ def main(argv=None) -> int:
                     f"max residual {100 * worst:.2f} cm"
                     + ("" if worst <= args.residual_warn_m else
                        ": re-measure the worst corner's position in arena_test_6ft.yaml"))
+            # Four points always fit with ~0 residual, whatever arena size the config claims.
+            # The printed tag size is the one independent ruler in view: wrong positions
+            # (a 6 ft config on an 8 ft floor) scale every measured tag by the same factor.
+            sides = []
+            for c in centers:
+                q = marker_math.undistort_points(np.median(np.stack(seen[c]), axis=0).reshape(4, 2), K, D)
+                m = arena_frame.project_px_to_arena(H, q)
+                sides.append(float(np.mean([np.linalg.norm(m[i] - m[(i + 1) % 4]) for i in range(4)])))
+            measured = float(np.median(sides))
+            ratio = measured / mm.corner_tag_m
+            rep.add(OK if abs(ratio - 1.0) <= SIZE_WARN_FRAC else WARN, "scale",
+                    f"corner tags measure {100 * measured:.1f} cm (configured {100 * mm.corner_tag_m:.0f} cm)"
+                    + ("" if abs(ratio - 1.0) <= SIZE_WARN_FRAC else
+                       f": either they are printed at that size (then set corner_tag_m in marker_map.yaml), "
+                       f"or the arena on the floor is not the {2 * half[0]:.2f} m one in arena_test_6ft.yaml "
+                       f"and every distance is off by x{1 / ratio:.2f}"))
             lo, hi = expected_tag_px(H, mm.vehicle_tag_m, half)
             arena_frame.save_homography_yaml(
                 hpath, H, residuals, arena_config="config/arena_test_6ft.yaml", image_size=(w, h),
                 notes="pixel -> arena-centered meters; fitted by scan_arena.py",
                 corner_px={c: centers[c] for c in centers},
                 extra={"camera_mode": cam.mode, "vehicle_tag_px": [round(lo, 1), round(hi, 1)],
-                       "scan_frames": n})
+                       "scan_frames": n, "corner_tag_m_measured": round(measured, 4),
+                       "corner_layout": {int(c): [float(v) for v in layout[c]] for c in centers}})
             rep.add(OK, "saved", str(hpath))
 
     # ------------------------------------------------------------------ 5. cars

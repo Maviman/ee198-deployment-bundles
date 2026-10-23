@@ -30,6 +30,9 @@ never slow a pose frame or a command.
                                driving by itself when it reappears.
                            /api/init runs `<--arena-cli> up`: starts whatever is not
                            running and leaves the cars DISARMED.
+    POST /api/scan         CALIBRATE, same rules as /api/init: `<--arena-cli> scan` (it
+                           disarms first), then `arena up` again if the scan passed.
+    GET  /api/scan.png     the annotated snapshot of the latest scan.
 """
 
 from __future__ import annotations
@@ -133,10 +136,16 @@ class Hub:
         self.run = {"armed_at": None, "cap_s": float(getattr(args, "run_cap_s", 120.0)),
                     "halt_reason": None, "halt_at": None}
         self._watch_gen = 0
-        # the dashboard's INITIALIZE: one `arena up` at a time
+        # the dashboard's INITIALIZE (`arena up`) and CALIBRATE (`arena scan`): ONE job at a
+        # time, since both take the camera; "kind" says which is in the slot
         self.init_lock = threading.Lock()
-        self.init_job = {"running": False, "started": None, "finished": None, "ok": None,
+        self.init_job = {"kind": None, "running": False, "started": None, "finished": None, "ok": None,
                          "rc": None, "lines": []}
+        # where `arena scan` leaves its annotated snapshot: copied next to the arena CLI when
+        # the camera is on the other Orin, written to ~/.arena/scan when it is on this one
+        cli = getattr(args, "arena_cli", "")
+        self.scan_pngs = ([Path(cli).resolve().parent / "arena_scan.png"] if cli else []) \
+            + [Path.home() / ".arena" / "scan" / "latest.png"]
 
     def event(self, text: str) -> None:
         self.events.append((time.strftime("%H:%M:%S"), text))
@@ -288,6 +297,7 @@ class Hub:
                 "can_control": bool(client_local),
                 "can_init": bool(getattr(self.args, "arena_cli", "")),
                 "ready": ready, "run": run, "init": dict(self.init_job, lines=self.init_job["lines"][-14:]),
+                "scan_png": (lambda q: q.stat().st_mtime if q else None)(self.scan_png()),
             }
 
     # ---------------------------------------------------------------- control
@@ -429,40 +439,69 @@ class Hub:
 
     def initialize(self) -> tuple[int, dict]:
         """INITIALIZE: `<arena-cli> up`. Starts what is not running, leaves the cars DISARMED."""
+        return self._start_job("init")
+
+    def calibrate(self) -> tuple[int, dict]:
+        """CALIBRATE: `<arena-cli> scan` (disarms, stops the camera service, re-fits the arena
+        frame on the vision Orin), then, only if the scan passed, `<arena-cli> up` to bring the
+        camera service back. A failed scan leaves it stopped: the old calibration is no good."""
+        return self._start_job("scan")
+
+    JOBS = {"init": ("INITIALIZE", [("up", 150)]),
+            "scan": ("CALIBRATE", [("scan", 150), ("up", 150)])}
+
+    def _start_job(self, kind: str) -> tuple[int, dict]:
+        label = self.JOBS[kind][0]
         cli = getattr(self.args, "arena_cli", "")
         if not cli:
             return 501, {"error": "this hub was started without --arena-cli (or ARENA_CLI): "
-                                  "run `./arena up` in a terminal instead"}
+                                  f"run `./arena {self.JOBS[kind][1][0][0]}` in a terminal instead"}
         c = self.latest.get("control")
         if c and c.get("armed") and time.time() - self.rx_at.get("control", 0) < 2.0:
             return 409, {"error": "the car is ARMED: press STOP first"}
         with self.init_lock:
             if self.init_job["running"]:
-                return 409, {"error": "initialization is already running"}
-            self.init_job.update(running=True, started=time.time(), finished=None, ok=None, rc=None, lines=[])
-        threading.Thread(target=self._init_job, args=(cli,), daemon=True).start()
-        self.event("INITIALIZE pressed: arena up")
+                busy = self.JOBS[self.init_job["kind"]][0]
+                return 409, {"error": f"{busy} is already running"}
+            self.init_job.update(kind=kind, running=True, started=time.time(), finished=None,
+                                 ok=None, rc=None, lines=[])
+        threading.Thread(target=self._run_job, args=(cli, kind), daemon=True).start()
+        self.event(f"{label} pressed: " + " then ".join(f"arena {s}" for s, _ in self.JOBS[kind][1]))
         return 200, {"started": True}
 
-    def _init_job(self, cli: str) -> None:
-        rc, deadline = None, time.time() + 150
-        try:
-            p = subprocess.Popen([cli, "up"], cwd=os.path.dirname(os.path.abspath(cli)) or None,
-                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace")
-            for line in p.stdout:
-                line = ANSI.sub("", line).rstrip()
-                if line:
-                    self.init_job["lines"].append(line[:200])
-                    del self.init_job["lines"][:-60]
-                if time.time() > deadline:
-                    p.kill()
-                    self.init_job["lines"].append("(killed: took longer than 150 s)")
-                    break
-            rc = p.wait(timeout=10)
-        except (OSError, subprocess.SubprocessError) as exc:
-            self.init_job["lines"].append(f"could not run {cli}: {exc}")
+    def _run_job(self, cli: str, kind: str) -> None:
+        label, steps = self.JOBS[kind]
+        lines, rc = self.init_job["lines"], None
+        for i, (sub, limit) in enumerate(steps):
+            if i:
+                lines.append(f"--- arena {sub} ---")
+            rc, deadline = None, time.time() + limit
+            try:
+                # stdin closed: `arena scan` uses `ssh -t`, which must never wait for a keyboard
+                p = subprocess.Popen([cli, sub], cwd=os.path.dirname(os.path.abspath(cli)) or None,
+                                     stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                     stderr=subprocess.STDOUT, text=True, errors="replace")
+                for line in p.stdout:
+                    line = ANSI.sub("", line).rstrip()
+                    if line and not line.startswith("Pseudo-terminal will not be allocated"):
+                        lines.append(line[:200])
+                        del lines[:-80]
+                    if time.time() > deadline:
+                        p.kill()
+                        lines.append(f"(killed: arena {sub} took longer than {limit} s)")
+                        break
+                rc = p.wait(timeout=10)
+            except (OSError, subprocess.SubprocessError) as exc:
+                lines.append(f"could not run {cli}: {exc}")
+            if rc != 0:
+                break
         self.init_job.update(running=False, finished=time.time(), rc=rc, ok=(rc == 0))
-        self.event("INITIALIZE finished: " + ("ok" if rc == 0 else f"needs attention (exit {rc})"))
+        self.event(f"{label} finished: " + ("ok" if rc == 0 else f"needs attention (exit {rc})"))
+
+    def scan_png(self) -> Path | None:
+        """The newest annotated snapshot `arena scan` left behind, if any."""
+        found = [p for p in self.scan_pngs if p.is_file()]
+        return max(found, key=lambda p: p.stat().st_mtime) if found else None
 
     # ------------------------------------------------------------ video proxy
     def _proxy(self) -> None:
@@ -525,8 +564,8 @@ def make_handler(hub: Hub):
         def _may_control(self) -> str | None:
             """None when this request may arm/initialize, else the reason it may not."""
             if not is_local(self.client_address[0]):
-                return ("START and INITIALIZE only work from a browser on the control Orin itself "
-                        "(STOP works from anywhere)")
+                return ("START, INITIALIZE and CALIBRATE only work from a browser on the control "
+                        "Orin itself (STOP works from anywhere)")
             if self.headers.get("X-Arena") != "control":
                 return "missing X-Arena header (use the dashboard's buttons)"
             origin = self.headers.get("Origin")
@@ -541,18 +580,26 @@ def make_handler(hub: Hub):
                 self._json(200, hub.state(client_local=is_local(self.client_address[0])))
             elif self.path.startswith("/video.mjpg"):
                 self._stream()
+            elif self.path.startswith("/api/scan.png"):
+                png = hub.scan_png()
+                if png is None:
+                    self._send(404, b"no scan yet", "text/plain")
+                else:
+                    self._send(200, png.read_bytes(), "image/png")
             else:
                 self._send(404, b"not found", "text/plain")
 
         def do_POST(self):
             if self.path.startswith("/api/stop"):
                 self._json(200, hub.disarm())
-            elif self.path.startswith("/api/arm") or self.path.startswith("/api/init"):
+            elif self.path.startswith(("/api/arm", "/api/init", "/api/scan")):
                 why = self._may_control()
                 if why:
                     self._json(403, {"error": why})
                 elif self.path.startswith("/api/arm"):
                     self._json(*hub.arm())
+                elif self.path.startswith("/api/scan"):
+                    self._json(*hub.calibrate())
                 else:
                     self._json(*hub.initialize())
             else:

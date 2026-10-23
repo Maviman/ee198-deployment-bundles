@@ -35,6 +35,8 @@
   .checks .c-bad::before { content: "\2717  "; color: var(--err); }
   .checks .d { color: var(--dim); }
   #initlog { font: 11px var(--mono); color: var(--dim); max-height: 150px; overflow: auto; white-space: pre-wrap; margin-top: 6px; }
+  #scanshot { display: none; margin-top: 8px; }
+  #scanshot img { width: 100%; border-radius: 4px; display: block; }
   main { padding: 12px 16px; display: grid; gap: 12px;
          grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); }
   .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px;
@@ -90,6 +92,7 @@
     <div class="big" id="tick">&ndash;</div>
   </div>
   <button class="act" id="init" title="Bring the whole system up (arena up): starts whatever is not running; the cars stay DISARMED">INITIALIZE</button>
+  <button class="act" id="scan" title="Re-fit the arena frame from the corner tags (arena scan), then restart the camera service">CALIBRATE</button>
   <button class="act go" id="start" title="ARM the car: the policy drives. Only from a browser on the control Orin, and only when every check is green">START</button>
   <button class="stop" id="stop" title="E-stop every car now (keeps services running; re-arm with `arena go`)">STOP</button>
 </header>
@@ -110,6 +113,8 @@
       <div class="checks" id="checks"></div>
       <div class="sub" id="runinfo" style="margin-top:8px"></div>
       <div id="initlog"></div>
+      <div id="scanshot"><div class="sub" id="scancap"></div>
+        <a id="scanlink" target="_blank"><img id="scanimg" alt="latest arena scan"></a></div>
     </section>
     <section class="panel">
       <h2>Latency (p50)</h2>
@@ -163,14 +168,16 @@ async function post(path) {
   try { j = await r.json(); } catch (e) { /* no body */ }
   return { ok: r.ok, j };
 }
-$("init").onclick = async () => {
-  actionMsg = null; $("init").disabled = true;
-  try {
-    const { ok, j } = await post("/api/init");
-    if (!ok) actionMsg = "INITIALIZE refused: " + (j.error || "unknown");
-  } catch (e) { actionMsg = "hub unreachable: " + e; }
-  if (S) render();
-};
+for (const [id, path, label] of [["init", "/api/init", "INITIALIZE"], ["scan", "/api/scan", "CALIBRATE"]]) {
+  $(id).onclick = async () => {
+    actionMsg = null; $("init").disabled = $("scan").disabled = true;
+    try {
+      const { ok, j } = await post(path);
+      if (!ok) actionMsg = label + " refused: " + (j.error || "unknown");
+    } catch (e) { actionMsg = "hub unreachable: " + e; }
+    if (S) render();
+  };
+}
 $("start").onclick = async () => {
   if (Date.now() > startConfirmUntil) {           // first click only asks; the second, within 5 s, arms
     startConfirmUntil = Date.now() + 5000;
@@ -314,11 +321,18 @@ function render() {
   $("start").textContent = armedNow ? `ARMED · ${Math.ceil(run.remaining_s ?? 0)} s` : confirming ? "CONFIRM: AREA CLEAR?" : "START";
   $("start").title = !canCtl ? "START only works from a browser on the control Orin itself"
     : !rd.ok ? "not ready: see \"Ready to start?\" below" : "ARM the car: the policy drives. Click twice within 5 s.";
-  $("init").disabled = !(canCtl && S.can_init) || armedNow || !!job.running;
-  $("init").textContent = job.running ? "INITIALIZING…" : "INITIALIZE";
+  const jobLabel = job.kind === "scan" ? "calibrate" : "initialize";
+  $("init").disabled = $("scan").disabled = !(canCtl && S.can_init) || armedNow || !!job.running;
+  $("init").textContent = job.running && job.kind === "init" ? "INITIALIZING…" : "INITIALIZE";
+  $("scan").textContent = job.running && job.kind === "scan" ? "CALIBRATING…" : "CALIBRATE";
   $("init").title = !canCtl ? "INITIALIZE only works from a browser on the control Orin itself"
     : !S.can_init ? "this hub was started without --arena-cli: run ./arena up in a terminal"
     : "Bring the whole system up (arena up): starts whatever is not running; the cars stay DISARMED";
+  $("scan").title = !canCtl ? "CALIBRATE only works from a browser on the control Orin itself"
+    : !S.can_init ? "this hub was started without --arena-cli: run ./arena scan in a terminal"
+    : armedNow ? "the car is ARMED: press STOP first"
+    : "Re-fit the arena frame from the four corner tags (arena scan; the car is disarmed and the camera "
+      + "service paused), then restart the camera service if the scan passed";
   $("checks").innerHTML = (rd.checks || []).map((x) =>
     `<div class="${x.ok ? "c-ok" : "c-bad"}">${x.name}${x.detail ? ` <span class="d">— ${x.detail}</span>` : ""}</div>`).join("")
     || `<div class="sub">no data</div>`;
@@ -329,10 +343,17 @@ function render() {
     : (run.halt_reason ? `Last run ended: ${run.halt_reason}.` : "")
       + (rd.hold_radius ? ` Hold zone ${rd.hold_radius} m: the car stands still inside it and keeps tracking.`
          : c ? " Hold zone is OFF: the car keeps driving at any distance from the evader." : "")
-      + (canCtl ? "" : " START and INITIALIZE only work from a browser on the control Orin; STOP works from anywhere.");
+      + (canCtl ? "" : " START, INITIALIZE and CALIBRATE only work from a browser on the control Orin; STOP works from anywhere.");
   $("initlog").textContent = job.started
-    ? (job.running ? "initializing…\n" : job.ok ? "initialize finished: ok\n" : "initialize finished: NEEDS ATTENTION (exit " + job.rc + ")\n") + (job.lines || []).join("\n")
+    ? (job.running ? jobLabel + " running…\n" : job.ok ? jobLabel + " finished: ok\n" : jobLabel + " finished: NEEDS ATTENTION (exit " + job.rc + ")\n") + (job.lines || []).join("\n")
     : "";
+  if (S.scan_png) {
+    const src = "/api/scan.png?" + S.scan_png;
+    if ($("scanimg").getAttribute("src") !== src) { $("scanimg").src = src; $("scanlink").href = src; }
+    $("scancap").textContent = "latest arena scan, " + new Date(S.scan_png * 1000).toLocaleTimeString()
+      + ": orange = corner tags, green = cars, yellow = the arena edge it fitted";
+    $("scanshot").style.display = "block";
+  } else { $("scanshot").style.display = "none"; }
 
   const al = (actionMsg ? [{ level: "error", text: actionMsg }] : []).concat(stopError ? [{ level: "error", text: stopError }] : []).concat(S.alerts || []);
   $("alerts").innerHTML = al.length

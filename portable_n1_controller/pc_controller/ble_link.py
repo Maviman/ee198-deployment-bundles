@@ -128,8 +128,9 @@ class BleEndpoint:
         self.index = index
         self.label = target_label(target)
         self._log = log or (lambda _msg: None)
-        # Test seam: a coroutine function (endpoint, stop_event) that plays the
-        # radio. The default is the bleak one below.
+        # Test seam: a coroutine function (endpoint, stop_event, gen) that plays
+        # the radio. The default is the bleak one below. ``gen`` tags the session:
+        # the endpoint ignores bytes from any session but the current one.
         self._connector = connector or _bleak_session
         self._asm = LineAssembler()
         self.state = "closed"
@@ -279,14 +280,23 @@ class BleEndpoint:
         self._loop = asyncio.get_running_loop()
         self._stop = asyncio.Event()
         self._outq = asyncio.Queue()
-        await self._connector(self, self._stop)
+        await self._connector(self, self._stop, gen)
 
-    # Called by the connector on the radio thread.
-    def _on_connected(self, mtu: int | None) -> None:
+    # Called by the connector on the radio thread. ``gen`` is the session the
+    # call comes from: anything from a session that has been replaced is dropped.
+    # Without this a client left over from a dropped connection, whose
+    # notification subscription BlueZ still honours, delivered a second copy of
+    # every notification after a reconnect, and the two copies interleaved into
+    # torn lines (measured 2026-10-30).
+    def _on_connected(self, mtu: int | None, gen: int | None = None) -> None:
+        if gen is not None and gen != self._gen:
+            return
         self.mtu = mtu
         self.connected = True
 
-    def _on_rx(self, data: bytes) -> None:
+    def _on_rx(self, data: bytes, gen: int | None = None) -> None:
+        if gen is not None and gen != self._gen:
+            return
         sock = self._tx_sock
         if sock is None:
             return
@@ -306,7 +316,9 @@ class BleEndpoint:
             except RuntimeError:
                 pass
         if thread is not None and thread.is_alive():
-            thread.join(timeout=CONNECT_TIMEOUT_S + 2.0)
+            # Briefly: the thread is a daemon and its session is already stale
+            # (gen bumped above), so a slow disconnect must not stall the loop.
+            thread.join(timeout=1.0)
         self._thread = None
         self._loop = None
         self._stop = None
@@ -356,7 +368,7 @@ class BleEndpoint:
                 "(needs 'ble' in its fw string)")
 
 
-async def _bleak_session(ep: BleEndpoint, stop: asyncio.Event) -> None:
+async def _bleak_session(ep: BleEndpoint, stop: asyncio.Event, gen: int) -> None:
     """The radio, with bleak: find the car, connect, subscribe to TX, then pump
     the outgoing queue into RX until told to stop or the car disconnects."""
     from bleak import BleakClient, BleakScanner
@@ -378,8 +390,8 @@ async def _bleak_session(ep: BleEndpoint, stop: asyncio.Event) -> None:
     await client.connect()
     try:
         mtu = getattr(client, "mtu_size", None)
-        await client.start_notify(TX_UUID, lambda _h, data: ep._on_rx(bytes(data)))
-        ep._on_connected(mtu)
+        await client.start_notify(TX_UUID, lambda _h, data: ep._on_rx(bytes(data), gen))
+        ep._on_connected(mtu, gen)
         chunk = max(MIN_CHUNK, (mtu or 23) - 3)
         q = ep._outq
         assert q is not None
@@ -397,8 +409,11 @@ async def _bleak_session(ep: BleEndpoint, stop: asyncio.Event) -> None:
         if gone.is_set() and not stop.is_set():
             raise BleLinkError("the car disconnected")
     finally:
-        if client.is_connected:
+        # ALWAYS tear the client down, connected or not: disconnect() is what
+        # drops its notification subscription. Skipping it when the car had
+        # already gone left that subscription alive into the next session.
+        for step in (client.stop_notify(TX_UUID), client.disconnect()):
             try:
-                await client.disconnect()
+                await step
             except Exception:       # noqa: BLE001
                 pass

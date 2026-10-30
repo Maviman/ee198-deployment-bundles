@@ -50,9 +50,9 @@ class FakeCar:
         self.frames: list[dict] = []
         self.drop = asyncio.Event()
 
-    async def __call__(self, ep: BleEndpoint, stop: asyncio.Event):
+    async def __call__(self, ep: BleEndpoint, stop: asyncio.Event, gen: int = 0):
         await asyncio.sleep(self.connect_delay)
-        ep._on_connected(self.mtu)
+        ep._on_connected(self.mtu, gen)
         q = ep._outq
         buf = b""
         while not stop.is_set() and not self.drop.is_set():
@@ -72,7 +72,7 @@ class FakeCar:
                     self.frames.append(msg)
                     reply = {"ack": msg["seq"], "car": self.car, "applied": True,
                              "slot": True, "rssi": None}
-                ep._on_rx((json.dumps(reply) + "\n").encode())
+                ep._on_rx((json.dumps(reply) + "\n").encode(), gen)
         if self.drop.is_set():
             raise RuntimeError("radio dropped")
 
@@ -177,3 +177,21 @@ def test_esplink_drives_a_ble_car_like_a_serial_one():
         assert car.frames[-1]["estop"] is True
     finally:
         esp_link.BleEndpoint = orig
+
+
+def test_bytes_from_a_replaced_session_are_ignored():
+    """A client left over from a dropped connection must not feed the new one."""
+    car = FakeCar()
+    ep = BleEndpoint(BleTarget("hive-car0"), 0, connector=car)
+    ep.open()
+    pump(ep, 0.5)
+    assert ep.state == "up"
+    stale_gen = ep._gen - 1
+    ep._on_rx(b'{"ack": 99, "car": 0}\n', stale_gen)      # from an old session: dropped
+    acks: list[dict] = []
+    pump(ep, 0.1, acks)
+    assert acks == []
+    ep._on_rx(b'{"ack": 7, "car": 0}\n', ep._gen)          # from the live session: delivered
+    pump(ep, 0.1, acks)
+    assert [a["ack"] for a in acks] == [7]
+    ep.close(drain_s=0.0)

@@ -47,19 +47,23 @@ static const char *RX_UUID      = "6E400002-B5A3-F393-E0A9-E50E24DCCA9E";   // h
 static const char *TX_UUID      = "6E400003-B5A3-F393-E0A9-E50E24DCCA9E";   // car -> host (notify)
 
 static const size_t   RX_RING   = 1024;   // 4 fleet-size frames; a stalled loop drops the NEWEST bytes
+static const size_t   TX_RING   = 1024;   // ~3 probe replies or ~12 ACKs waiting for the radio
+static const int      TX_PER_SERVICE = 4; // notifications per loop() pass: spreads a long reply out
 static const uint16_t WANT_MTU  = 185;    // asked of the central; a 1-car frame (~80 B) then fits one write
 static const uint16_t CONN_MIN  = 6;      // 7.5 ms  (units of 1.25 ms)
 static const uint16_t CONN_MAX  = 12;     // 15 ms
 static const uint16_t CONN_LAT  = 0;
-static const uint16_t CONN_TO   = 200;    // 2 s supervision timeout (units of 10 ms)
+static const uint16_t CONN_TO   = 400;    // 4 s supervision timeout (units of 10 ms): rides out a fade
 
 class Link {
  public:
-  uint32_t connects = 0, disconnects = 0, rxBytes = 0, txBytes = 0, rxDropped = 0;
+  uint32_t connects = 0, disconnects = 0, rxBytes = 0, txBytes = 0, rxDropped = 0, txDropped = 0;
 
   // Advertise as `name` (the controller can find the car by it: --esp ble:<name>).
   void begin(const char *name) {
+    self_ = this;
     BLEDevice::init(name);
+    BLEDevice::setCustomGattsHandler(gattsHook);
     BLEDevice::setMTU(WANT_MTU);
     server_ = BLEDevice::createServer();
     server_->setCallbacks(new ServerCb(this));
@@ -104,33 +108,29 @@ class Link {
     return c;
   }
 
-  // One reply line (no newline needed; one is appended), notified in MTU-sized
-  // chunks. Silently dropped when no host is connected or subscribed.
+  // One reply line (no newline needed; one is appended) is QUEUED; service()
+  // notifies it in MTU-sized chunks, a few per loop() pass and never while the
+  // stack reports congestion. Notifying straight from here lost data: Bluedroid
+  // drops a notification outright when its transmit queue is full, and at the
+  // default 20-byte chunk a 290-byte probe reply is 15 notifications, of which
+  // only the first ~9 ever left the radio (measured 2026-10-30). Dropped here
+  // only when no host is connected, or the queue itself is full (txDropped).
   void send(const char *text, size_t n) {
-    if (!connected_ || tx_ == nullptr) return;
-    uint16_t mtu = server_->getPeerMTU(connId_);
-    size_t chunk = (mtu > 23) ? (size_t)(mtu - 3) : 20;
-    // Build line + '\n' then split; the host's assembler joins the pieces.
+    if (!connected_ || tx_ == nullptr) { txDropped += n + 1; return; }
     size_t total = n + 1;
-    for (size_t off = 0; off < total; off += chunk) {
-      size_t len = (total - off < chunk) ? (total - off) : chunk;
-      uint8_t buf[256];
-      if (len > sizeof(buf)) len = sizeof(buf);
-      for (size_t i = 0; i < len; i++) {
-        size_t src = off + i;
-        buf[i] = (src < n) ? (uint8_t)text[src] : (uint8_t)'\n';
-      }
-      tx_->setValue(buf, len);
-      tx_->notify();
-      txBytes += len;
+    if (txFree() < total) { txDropped += total; return; }   // whole line or nothing: never a torn line
+    for (size_t i = 0; i < total; i++) {
+      txRing_[txHead_] = (i < n) ? text[i] : '\n';
+      txHead_ = (txHead_ + 1) % TX_RING;
     }
   }
 
-  // From loop(): act on connect/disconnect flags set by the BT task. Returns a
-  // one-line event to log, or nullptr.
+  // From loop(): act on connect/disconnect flags set by the BT task, and push
+  // queued reply bytes to the host. Returns a one-line event to log, or nullptr.
   const char *service() {
     if (disconnectedFlag_) {
       disconnectedFlag_ = false;
+      txHead_ = txTail_ = 0;          // replies for a host that left
       if (!advertising_) { BLEDevice::startAdvertising(); advertising_ = true; }
       return "BLE: host disconnected -> advertising again";
     }
@@ -138,8 +138,26 @@ class Link {
       connectedFlag_ = false;
       return "BLE: host connected";
     }
+    if (connected_ && tx_ != nullptr) {
+      uint16_t mtu = server_->getPeerMTU(connId_);
+      size_t chunk = (mtu > 23) ? (size_t)(mtu - 3) : 20;
+      if (chunk > 244) chunk = 244;
+      for (int k = 0; k < TX_PER_SERVICE && txHead_ != txTail_ && !congested_; k++) {
+        uint8_t buf[244];
+        size_t len = 0;
+        while (len < chunk && txHead_ != txTail_) {
+          buf[len++] = (uint8_t)txRing_[txTail_];
+          txTail_ = (txTail_ + 1) % TX_RING;
+        }
+        tx_->setValue(buf, len);
+        tx_->notify();
+        txBytes += len;
+      }
+    }
     return nullptr;
   }
+
+  size_t txQueued() const { return (txHead_ + TX_RING - txTail_) % TX_RING; }
 
  private:
   struct ServerCb : public BLEServerCallbacks {
@@ -155,6 +173,7 @@ class Link {
     }
     void onDisconnect(BLEServer *) override {
       link->connected_ = false;
+      link->congested_ = false;
       link->disconnects++;
       link->disconnectedFlag_ = true;
       // Drop whatever half-line was in flight: the next frame starts clean.
@@ -183,8 +202,22 @@ class Link {
     Link *link;
   };
 
+  size_t txFree() const { return TX_RING - 1 - txQueued(); }
+
+  // Bluedroid tells us when its transmit queue is full / drained again. Routed
+  // through the library's global hook; there is one Link, so a static is fine.
+  static void gattsHook(esp_gatts_cb_event_t event, esp_gatt_if_t, esp_ble_gatts_cb_param_t *param) {
+    if (event == ESP_GATTS_CONGEST_EVT && self_ != nullptr) {
+      self_->congested_ = param->congest.congested;
+    }
+  }
+  static Link *self_;
+
   BLEServer *server_ = nullptr;
   BLECharacteristic *tx_ = nullptr;
+  volatile bool congested_ = false;
+  char txRing_[TX_RING];
+  size_t txHead_ = 0, txTail_ = 0;
   volatile bool connected_ = false;
   volatile bool connectedFlag_ = false;
   volatile bool disconnectedFlag_ = false;
@@ -195,6 +228,8 @@ class Link {
   portMUX_TYPE mux_ = portMUX_INITIALIZER_UNLOCKED;
 };
 
+Link *Link::self_ = nullptr;
+
 }  // namespace blelink
 
 #else  // no BLE stack: the host-test stand-in
@@ -203,13 +238,14 @@ namespace blelink {
 
 class Link {
  public:
-  uint32_t connects = 0, disconnects = 0, rxBytes = 0, txBytes = 0, rxDropped = 0;
+  uint32_t connects = 0, disconnects = 0, rxBytes = 0, txBytes = 0, rxDropped = 0, txDropped = 0;
   void begin(const char *) {}
   String address() const { return String("00:00:00:00:00:00"); }
   bool connected() const { return false; }
   int read() { return -1; }
   void send(const char *, size_t) {}
   const char *service() { return nullptr; }
+  size_t txQueued() const { return 0; }
 };
 
 }  // namespace blelink

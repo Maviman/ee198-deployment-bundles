@@ -49,6 +49,7 @@ int host_wifi_begin_calls = 0;
 bool host_udp_bound = false;
 std::deque<HostDatagram> host_udp_rx;
 HardwareSerial Serial;
+EspClass ESP;
 WiFiClass WiFi;
 
 static std::vector<std::string> g_events;

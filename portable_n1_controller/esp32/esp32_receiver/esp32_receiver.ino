@@ -72,6 +72,26 @@
  *    which drive EN and IO0). Buttons come up released and the 100 k pull-downs
  *    hold them; the controller sends nothing until the probe is answered.
  *
+ * BLUETOOTH LE (the car untethered without WiFi: `run_controller.py --esp
+ * ble:<name or address>`, see pc_controller/ble_link.py on the PC side):
+ *  - The car advertises as "hive-car<index>" with the Nordic UART Service
+ *    (ble_link.h). The host writes the SAME command frames, byte for byte, to
+ *    the service's RX characteristic, and the car notifies its replies (ACK,
+ *    probe reply) on TX, one JSON line each. The bytes go through the same
+ *    line framer and the same handlePacket as the UART, so the rules are the
+ *    same: a frame refreshes the failsafe only if it parsed, nothing else does.
+ *  - A BLE disconnect is just a stalled stream: the failsafe releases every
+ *    button 300 ms later and the car advertises again. "rssi" is null.
+ *  - The ESP32-S3 has no classic Bluetooth (no SPP), so this is BLE only.
+ *  - WHICH RADIO: the serial setting `radio wifi|ble|both` (saved in NVS,
+ *    applied at the next boot; the command reboots). `wifi` (the default, the
+ *    deployed fleet's behaviour): WiFi with power-save OFF for low UDP latency,
+ *    no BLE. `ble`: BLE only, WiFi never started. `both`: BLE and WiFi, with
+ *    WiFi modem-sleep ON, because the S3's coexistence layer aborts at boot if
+ *    BLE is enabled while WiFi power-save is off (measured 2026-10-30:
+ *    coex_core_enable -> abort in a boot loop). Modem sleep costs the UDP path
+ *    ~100 ms naps (measured 2026-07-07), so `both` is for bench work, not runs.
+ *
  * Libraries: ArduinoJson (Benoit Blanchon). Nothing else.
  *
  * HARDWARE -- the ESP32 presses the 4 buttons of the car's handheld remote:
@@ -142,6 +162,7 @@
 #include <Preferences.h>
 #include "button_mod.h"   // command -> button presses (shared with esp32/test_host)
 #include "uart_frame.h"   // UART bytes -> command frames / console lines (shared with esp32/test_host)
+#include "ble_link.h"     // Bluetooth LE serial link (stubbed in esp32/test_host)
 
 // ---- EDIT THESE ------------------------------------------------------------
 // WiFi credentials live in wifi_credentials.h (gitignored, stays local).
@@ -153,7 +174,7 @@
 #include <ArduinoOTA.h>
 #endif
 
-#define FW_VERSION "2026.10-buttons-uart"
+#define FW_VERSION "2026.10-buttons-uart-ble"
 
 const uint16_t UDP_PORT = 8888;
 
@@ -175,6 +196,10 @@ const bool   DEFAULT_MODULATED = false;  // binary: the V3 car's remote does not
 const int    DEFAULT_SLOT_MS   = 40;     // a press this short must still register on the remote
 const double DEFAULT_THROTTLE_LIMIT = 0.6;   // MODULATED mode only: max press fraction for throttle.
                                               // Binary presses solid; it has no such cap.
+// Which radio carries commands (serial `radio`, see BLUETOOTH LE above). A board
+// that never saved one gets this.
+enum Radio { RADIO_WIFI = 0, RADIO_BLE = 1, RADIO_BOTH = 2 };
+const Radio DEFAULT_RADIO = RADIO_WIFI;
 // Deadband, full-on, binary threshold and the reversing gap: see button_mod.h.
 // ----------------------------------------------------------------------------
 
@@ -192,6 +217,7 @@ unsigned long lastSlotWarnMs = 0;
 bool otaEnabled = false;
 
 bool modulated = DEFAULT_MODULATED;
+Radio radio = DEFAULT_RADIO;
 int slotMs = DEFAULT_SLOT_MS;
 double throttleLimit = DEFAULT_THROTTLE_LIMIT;
 int pins[4] = {DEFAULT_PINS[0], DEFAULT_PINS[1], DEFAULT_PINS[2], DEFAULT_PINS[3]};
@@ -207,17 +233,24 @@ unsigned long nextSlotMs = 0;
 uartframe::LineFramer serialFramer;
 unsigned long lastFrameWarnMs = 0;
 
+// Bluetooth LE: the same frames over the Nordic UART Service (ble_link.h).
+blelink::Link ble;
+uartframe::LineFramer bleFramer;
+
 // WiFi connects in the background: the UART needs no network (see serviceWifi).
 const unsigned long WIFI_RETRY_MS = 20000;
 bool netStarted = false;       // WiFi connected at least once: UDP socket and OTA are up
 unsigned long lastWifiTryMs = 0;
 
-// Where a reply goes: back to the UDP sender, or out of the UART as one line.
+// Where a reply goes: back to the UDP sender, out of the UART as one line, or
+// as a BLE notification (one line, chunked to the MTU).
+enum Via { VIA_UDP, VIA_UART, VIA_BLE };
 struct Reply {
-  bool viaSerial;
+  Via via;
   IPAddress ip;
   uint16_t port;
 };
+const char *viaName(Via v) { return v == VIA_UART ? "uart" : (v == VIA_BLE ? "ble" : "udp"); }
 
 // ------------------------------------------------------------------ buttons
 void writeButton(int b, bool pressed) {
@@ -299,6 +332,8 @@ void loadSettings() {
   carIndexWasStored = (stored >= 0 && stored < MAX_CARS);
   carIndex = carIndexWasStored ? stored : DEFAULT_CAR_INDEX;
   modulated = prefs.getBool("btn_mod", DEFAULT_MODULATED);
+  int r = prefs.getInt("radio", DEFAULT_RADIO);
+  radio = (r >= RADIO_WIFI && r <= RADIO_BOTH) ? (Radio)r : DEFAULT_RADIO;
   int s = prefs.getInt("slot_ms", DEFAULT_SLOT_MS);
   slotMs = (s >= 15 && s <= 200) ? s : DEFAULT_SLOT_MS;
   double lim = prefs.getDouble("thr_limit", DEFAULT_THROTTLE_LIMIT);
@@ -316,11 +351,16 @@ void loadSettings() {
   for (int b = 0; b < 4; b++) pins[b] = ok ? p[b] : DEFAULT_PINS[b];
 }
 
+const char *radioName(Radio r) { return r == RADIO_BLE ? "ble" : (r == RADIO_BOTH ? "both" : "wifi"); }
+bool wifiWanted() { return radio != RADIO_BLE; }
+bool bleWanted() { return radio != RADIO_WIFI; }
+
 void printSettings() {
   Serial.printf("buttons: FWD=GPIO%d BACK=GPIO%d LEFT=GPIO%d RIGHT=GPIO%d | mode %s",
                 pins[0], pins[1], pins[2], pins[3], modulated ? "MODULATED" : "BINARY");
   Serial.printf(", slot %d ms", slotMs);
   if (modulated) Serial.printf(", throttle limit %.2f", throttleLimit);
+  Serial.printf(" | radio %s", radioName(radio));
   Serial.println();
 }
 
@@ -392,6 +432,26 @@ void handleConsoleLine(char *line) {
       }
     }
     printSettings();
+  } else if (strcmp(line, "radio") == 0) {
+    if (hasArg && !refusedWhileDriving()) {
+      Radio r;
+      bool ok = true;
+      if (strcmp(arg, "wifi") == 0) r = RADIO_WIFI;
+      else if (strcmp(arg, "ble") == 0) r = RADIO_BLE;
+      else if (strcmp(arg, "both") == 0) r = RADIO_BOTH;
+      else ok = false;
+      if (!ok) {
+        Serial.println("REJECTED: radio wifi | radio ble | radio both");
+      } else {
+        prefs.putInt("radio", (int)r);
+        Serial.printf("radio set to %s (saved) -- rebooting to apply\n", radioName(r));
+        Serial.flush();
+        delay(100);
+        ESP.restart();
+      }
+    } else {
+      printSettings();
+    }
   } else if (strcmp(line, "slot") == 0) {
     if (hasArg && !refusedWhileDriving()) {
       if (parseLong(arg, n) && n >= 15 && n <= 200) { slotMs = (int)n; prefs.putInt("slot_ms", slotMs); }
@@ -434,7 +494,7 @@ void handleConsoleLine(char *line) {
     runButtonTest();
   } else if (*line) {
     Serial.println("commands: index [n] | mode [mod|binary] | slot [ms] | limit [0.1..1] | "
-                   "pins [fwd back left right] | test");
+                   "pins [fwd back left right] | radio [wifi|ble|both] | test");
   }
 }
 
@@ -443,9 +503,11 @@ void handleConsoleLine(char *line) {
 // reply is one line.
 void sendReply(const Reply &to, const char *msg) {
   size_t n = strlen(msg);
-  if (to.viaSerial) {
+  if (to.via == VIA_UART) {
     Serial.write((const uint8_t*)msg, n);
     Serial.write('\n');
+  } else if (to.via == VIA_BLE) {
+    ble.send(msg, n);
   } else {
     udp.beginPacket(to.ip, to.port);
     udp.write((const uint8_t*)msg, n);
@@ -453,10 +515,11 @@ void sendReply(const Reply &to, const char *msg) {
   }
 }
 
-// The "rssi" field of a reply is the WiFi signal. Over the UART no radio is in
-// the path, so it is null rather than a number that describes some other link.
+// The "rssi" field of a reply is the WiFi signal. Over the UART or BLE the WiFi
+// radio is not the path, so it is null rather than a number describing some
+// other link.
 const char *rssiText(const Reply &to, char *buf, size_t size) {
-  if (to.viaSerial) return "null";
+  if (to.via != VIA_UDP) return "null";
   snprintf(buf, size, "%d", WiFi.RSSI());
   return buf;
 }
@@ -469,12 +532,12 @@ void sendInfo(const Reply &to) {
            "{\"car\":%d,\"fw\":\"%s\",\"mac\":\"%s\",\"failsafe\":%s,"
            "\"up_s\":%lu,\"last_seq\":%ld,\"rssi\":%s,\"ota\":%s,"
            "\"act\":\"buttons4\",\"mode\":\"%s\",\"slot_ms\":%d,\"thr_limit\":%.2f,"
-           "\"via\":\"%s\"}",
+           "\"radio\":\"%s\",\"via\":\"%s\"}",
            carIndex, FW_VERSION, WiFi.macAddress().c_str(),
            failsafeActive ? "true" : "false", millis() / 1000UL, lastSeq,
            rssiText(to, rssi, sizeof(rssi)), otaEnabled ? "true" : "false",
            modulated ? "mod" : "binary", slotMs, throttleLimit,
-           to.viaSerial ? "uart" : "udp");
+           radioName(radio), viaName(to.via));
   sendReply(to, buf);
 }
 
@@ -489,7 +552,7 @@ void handleCfg(JsonVariant cfg, const Reply &to) {
     int idx = cfg["index"] | -1;
     if (setCarIndex(idx)) {
       Serial.printf("car index set to %d over %s (saved) -- now drives cmd[%d]\n",
-                    carIndex, to.viaSerial ? "the UART" : "the network", carIndex);
+                    carIndex, viaName(to.via), carIndex);
     }
   }
   sendInfo(to);
@@ -591,7 +654,7 @@ void pollSerial() {
   while (Serial.available()) {
     switch (serialFramer.push((char)Serial.read())) {
       case uartframe::FRAME:
-        handlePacket(serialFramer.line(), Reply{true, IPAddress(), 0});
+        handlePacket(serialFramer.line(), Reply{VIA_UART, IPAddress(), 0});
         break;
       case uartframe::CONSOLE:
         handleConsoleLine(serialFramer.line());
@@ -610,6 +673,23 @@ void pollSerial() {
         break;
       default:
         break;
+    }
+  }
+}
+
+// Bluetooth LE: the host's bytes through their own framer, frames into the same
+// handler. Only frames: there is no console over BLE (settings are the cfg
+// packet, which works on every transport). Non-blocking, like pollSerial.
+void pollBle() {
+  const char *ev = ble.service();
+  if (ev) Serial.println(ev);
+  for (int c = ble.read(); c >= 0; c = ble.read()) {
+    switch (bleFramer.push((char)c)) {
+      case uartframe::FRAME:
+        handlePacket(bleFramer.line(), Reply{VIA_BLE, IPAddress(), 0});
+        break;
+      default:
+        break;   // console text, noise or an oversized line over BLE: ignored
     }
   }
 }
@@ -652,6 +732,7 @@ void startNetwork() {
 // start radio work with a button held down). After that, reconnecting is left
 // to the WiFi stack, as it always was.
 void serviceWifi() {
+  if (!wifiWanted()) return;
   if (WiFi.status() == WL_CONNECTED) {
     if (!netStarted) startNetwork();
     return;
@@ -681,16 +762,27 @@ void setup() {
   configurePins();
   goNeutral();
 
-  WiFi.mode(WIFI_STA);
-  // Power-save OFF: with it on, the radio naps between router beacons and
-  // every other packet waits ~100 ms for wake-up (measured 2026-07-07:
-  // alternating 15/105 ms RTTs, 6% loss). Costs some battery; a 10 Hz
-  // control loop can't afford the naps.
-  WiFi.setSleep(false);
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
-  lastWifiTryMs = millis();
-  // Not waited for: the UART needs no network (see serviceWifi).
-  Serial.println("connecting to WiFi in the background (UART commands need no network)");
+  // BLE first, before any WiFi call: the coexistence layer is set up by whichever
+  // radio starts first, and BLE before WiFi is the order the S3 accepts.
+  char bleName[16];
+  snprintf(bleName, sizeof(bleName), "hive-car%d", carIndex);
+  if (bleWanted()) ble.begin(bleName);
+  if (wifiWanted()) {
+    WiFi.mode(WIFI_STA);
+    // Power-save OFF: with it on, the radio naps between router beacons and
+    // every other packet waits ~100 ms for wake-up (measured 2026-07-07:
+    // alternating 15/105 ms RTTs, 6% loss). Costs some battery; a 10 Hz
+    // control loop can't afford the naps. With BLE on as well the S3 aborts
+    // at boot unless modem-sleep stays on, so `both` keeps the naps.
+    WiFi.setSleep(radio == RADIO_BOTH);
+    WiFi.begin(WIFI_SSID, WIFI_PASS);
+    lastWifiTryMs = millis();
+    // Not waited for: the UART needs no network (see serviceWifi).
+    Serial.println("connecting to WiFi in the background (UART commands need no network)");
+  } else {
+    WiFi.mode(WIFI_OFF);
+    Serial.println("WiFi OFF (radio ble): commands over BLE or the UART only");
+  }
   // Loud, unmissable: an index mix-up between two cars is otherwise only
   // visible as "the wrong car moved", which is slow to diagnose on the floor.
   Serial.printf("=== CAR INDEX %d -- this car obeys cmd[%d] ===\n", carIndex, carIndex);
@@ -704,11 +796,18 @@ void setup() {
   Serial.println("UART: command frames (one JSON object per line) are accepted on this port "
                  "at 115200 baud:  run_controller.py --esp serial:<device>");
   Serial.printf("firmware %s\n", FW_VERSION);
+  if (bleWanted()) {
+    Serial.printf("BLE: advertising as %s (%s) -- run_controller.py --esp ble:%s\n",
+                  bleName, ble.address().c_str(), bleName);
+  } else {
+    Serial.println("BLE off (radio wifi): `radio ble` or `radio both` turns it on)");
+  }
   nextSlotMs = millis();
 }
 
 void loop() {
   pollSerial();            // the UART: console lines and command frames
+  if (bleWanted()) pollBle();   // Bluetooth LE: command frames
   serviceWifi();           // UDP and OTA come up when WiFi first connects
 
   if (netStarted) {
@@ -716,7 +815,7 @@ void loop() {
     if (len > 0) {
       int n = udp.read(packetBuf, sizeof(packetBuf) - 1);
       packetBuf[max(n, 0)] = '\0';
-      handlePacket(packetBuf, Reply{false, udp.remoteIP(), udp.remotePort()});
+      handlePacket(packetBuf, Reply{VIA_UDP, udp.remoteIP(), udp.remotePort()});
     }
   }
 

@@ -3,6 +3,7 @@
 #include "Arduino.h"
 
 #define WIFI_STA 1
+#define WIFI_OFF 0
 enum { WL_IDLE_STATUS = 0, WL_NO_SSID_AVAIL = 1, WL_CONNECTED = 3, WL_CONNECT_FAILED = 4,
        WL_CONNECTION_LOST = 5, WL_DISCONNECTED = 6 };
 

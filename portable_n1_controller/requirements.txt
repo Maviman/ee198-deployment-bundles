@@ -5,3 +5,6 @@ onnxruntime>=1.16
 # when the port is opened, so a controller that never uses the serial transport
 # runs fine without it.
 pyserial>=3.5
+# Only for a car on Bluetooth LE (--esp ble:<name or address>). Imported lazily
+# like pyserial; a controller that never uses BLE runs fine without it.
+bleak>=0.21

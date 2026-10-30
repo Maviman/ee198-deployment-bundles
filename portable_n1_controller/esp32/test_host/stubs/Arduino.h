@@ -50,12 +50,20 @@ class IPAddress {
 };
 
 // The console UART. println ends a line with CRLF, as the real core does.
+// ESP.restart(): the host records it; the sketch is not re-run.
+struct EspClass {
+  int restarts = 0;
+  void restart() { restarts++; }
+};
+extern EspClass ESP;
+
 class HardwareSerial {
  public:
   std::deque<uint8_t> rx;
   size_t rx_cap = 256;                       // the core's default ring buffer
   size_t setRxBufferSize(size_t n) { rx_cap = n; return n; }
   void begin(unsigned long) {}
+  void flush() {}
   int available() { return (int)rx.size(); }
   int read() {
     if (rx.empty()) return -1;

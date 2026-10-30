@@ -205,7 +205,7 @@ def test_the_car_boots_and_listens_on_the_uart_with_no_wifi_at_all(fw):
     # ... and it already takes UART commands: a probe is answered
     reply = [json.loads(e.text) for e in f.rx(PROBE_FRAME) if e.kind == "TX"]
     assert len(reply) == 1
-    assert reply[0]["car"] == 0 and reply[0]["fw"].endswith("-uart")
+    assert reply[0]["car"] == 0 and "uart" in reply[0]["fw"]
     assert reply[0]["via"] == "uart" and reply[0]["rssi"] is None
     assert reply[0]["failsafe"] is True
     assert f.pressed == [], "buttons are released from the first instant"

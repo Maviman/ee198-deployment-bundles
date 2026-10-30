@@ -63,6 +63,18 @@ from pc_controller.serial_link import (
     parse_serial_spec,
     target_label as _serial_label,
 )
+from pc_controller.ble_link import (
+    BLE_PREFIX,
+    BleEndpoint,
+    BleTarget,
+    parse_ble_spec,
+    target_label as _ble_label,
+)
+
+# The "line" transports: a byte stream with newline-framed packets and an
+# endpoint object that verifies which car is on the other end (serial_link.py,
+# ble_link.py). A target that is not one of these is a UDP (host, port).
+LINE_TARGETS = (SerialTarget, BleTarget)
 
 DEFAULT_PORT = 8888
 # DSCP "expedited forwarding". WiFi WMM maps it to the voice access category,
@@ -108,13 +120,15 @@ def target_label(target) -> str:
     (unchanged), 'serial:/dev/ttyUSB0' for a serial port."""
     if isinstance(target, SerialTarget):
         return _serial_label(target)
+    if isinstance(target, BleTarget):
+        return _ble_label(target)
     host, port = target
     return f"{host}:{port}"
 
 
 def target_uri(target) -> str:
     """Like target_label but with a scheme on UDP targets, for log lines."""
-    return target_label(target) if isinstance(target, SerialTarget) else f"udp://{target_label(target)}"
+    return target_label(target) if isinstance(target, LINE_TARGETS) else f"udp://{target_label(target)}"
 
 
 def parse_targets(spec: str, default_port: int = DEFAULT_PORT) -> list[tuple[str, int]]:
@@ -136,6 +150,9 @@ def parse_targets(spec: str, default_port: int = DEFAULT_PORT) -> list[tuple[str
         if chunk.lower().startswith(SERIAL_PREFIX):
             targets.append(parse_serial_spec(chunk))
             continue
+        if chunk.lower().startswith(BLE_PREFIX):
+            targets.append(parse_ble_spec(chunk))
+            continue
         if chunk.startswith("/"):
             raise ValueError(f"{chunk!r} looks like a serial device, not a host: "
                              f"write it as {SERIAL_PREFIX}{chunk}")
@@ -151,7 +168,7 @@ def parse_targets(spec: str, default_port: int = DEFAULT_PORT) -> list[tuple[str
         targets.append((host, port_i))
     if not targets:
         raise ValueError(f"no ESP addresses parsed from {spec!r}")
-    udp = [t for t in targets if not isinstance(t, SerialTarget)]
+    udp = [t for t in targets if not isinstance(t, LINE_TARGETS)]
     dupes = {t for t in udp if udp.count(t) > 1}
     if dupes:
         raise ValueError(
@@ -163,6 +180,12 @@ def parse_targets(spec: str, default_port: int = DEFAULT_PORT) -> list[tuple[str
         raise ValueError(
             f"duplicate serial device(s) {dupe_devices} -- two fleet slots on one port "
             "means a car obeys the wrong slot's command")
+    peers = [t.peer for t in targets if isinstance(t, BleTarget)]
+    dupe_peers = sorted({d for d in peers if peers.count(d) > 1})
+    if dupe_peers:
+        raise ValueError(
+            f"duplicate BLE car(s) {dupe_peers} -- two fleet slots on one car "
+            "means it obeys the wrong slot's command")
     return targets
 
 
@@ -182,13 +205,13 @@ class EspLink:
         if isinstance(targets, str):
             self.targets = parse_targets(targets, port)
         else:
-            self.targets = [t if isinstance(t, SerialTarget) else (str(t[0]), int(t[1]))
+            self.targets = [t if isinstance(t, LINE_TARGETS) else (str(t[0]), int(t[1]))
                             for t in targets]
         # Resolve names ONCE: sendto() with a hostname (e.g. hive-car0.local)
         # would do an mDNS lookup on every 10 Hz packet.
         resolved = []
         for t in self.targets:
-            if isinstance(t, SerialTarget):
+            if isinstance(t, LINE_TARGETS):
                 resolved.append(t)
                 continue
             host, p = t
@@ -198,9 +221,10 @@ class EspLink:
                 resolved.append((host, p))       # leave it; the send will fail loudly per packet
         self.targets = resolved
         self._log = log or (lambda _msg: None)
-        self._serial: dict[int, SerialEndpoint] = {}
+        # Every line-transport endpoint (serial and BLE), by fleet slot.
+        self._serial: dict[int, SerialEndpoint | BleEndpoint] = {}
         self.sock = None
-        if any(not isinstance(t, SerialTarget) for t in self.targets):
+        if any(not isinstance(t, LINE_TARGETS) for t in self.targets):
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self.sock.setblocking(False)
             try:
@@ -226,6 +250,9 @@ class EspLink:
                 if isinstance(t, SerialTarget):
                     self._serial[i] = SerialEndpoint(t, i, log=self._log)
                     self._serial[i].open()
+                elif isinstance(t, BleTarget):
+                    self._serial[i] = BleEndpoint(t, i, log=self._log)
+                    self._serial[i].open()
         except BaseException:
             self._release()
             raise
@@ -244,7 +271,8 @@ class EspLink:
         return target_label(self.targets[i])
 
     def transport(self, i: int) -> str:
-        return "serial" if isinstance(self.targets[i], SerialTarget) else "udp"
+        t = self.targets[i]
+        return "serial" if isinstance(t, SerialTarget) else ("ble" if isinstance(t, BleTarget) else "udp")
 
     def link_up(self, i: int) -> bool | None:
         """Serial: is the port verified and working right now. UDP: None (there
@@ -253,7 +281,7 @@ class EspLink:
         return None if ep is None else ep.state == "up"
 
     @property
-    def serial_endpoints(self) -> dict[int, SerialEndpoint]:
+    def serial_endpoints(self) -> dict[int, SerialEndpoint | BleEndpoint]:
         return self._serial
 
     # -- serial transport -----------------------------------------------------
@@ -372,7 +400,7 @@ class EspLink:
                 del self._sent_at[old_seq]
         self._service()
         for i, target in enumerate(self.targets):
-            if isinstance(target, SerialTarget):
+            if isinstance(target, LINE_TARGETS):
                 # False: the board is not verified yet, or its port just failed.
                 # That car gets nothing this tick and its own dead-man stops it,
                 # exactly as for a UDP car that is off.

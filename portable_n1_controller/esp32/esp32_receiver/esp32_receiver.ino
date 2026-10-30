@@ -117,9 +117,14 @@
  *   test                         press FWD, BACK, LEFT, RIGHT in turn (wheels OFF)
  *
  * PIN RULES (ESP32-S3-WROOM-1, DevKitC-1). The setter refuses anything else:
- *   OK:     1 2 4-18 21 39-42 47
- *   NEVER:  0 3 45 46 (strapping: some are pulled up at reset, so the button
- *           would be pressed while the chip boots), 19 20 (native USB),
+ *   OK:     1 2 4-18 21 39-42 45 46 47
+ *           (45 and 46 are strapping pins, but the S3 pulls both DOWN at reset:
+ *           an active-high button on them is released through boot, and the
+ *           transistor base can only load the pin low, so the strapping values
+ *           -- VDD_SPI 3.3 V, normal boot -- cannot be disturbed. GPIO46 is
+ *           output-capable on the S3; it is input-only on the S2.)
+ *   NEVER:  0 3 (strapping, pulled UP at reset: the button would be pressed
+ *           while the chip boots), 19 20 (native USB),
  *           43 44 (UART0 = the serial console: every log line would press the
  *           button), 26-32 (flash), 33-37 (PSRAM on the -R8 modules),
  *           38 48 (the RGB LED on the DevKitC).
@@ -229,7 +234,7 @@ void parkPin(int p) {
 
 bool pinAllowed(int p) {
   static const int ok[] = {1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18,
-                           21, 39, 40, 41, 42, 47};
+                           21, 39, 40, 41, 42, 45, 46, 47};
   for (int v : ok) if (v == p) return true;
   return false;
 }
@@ -408,7 +413,7 @@ void handleConsoleLine(char *line) {
       }
       if (!ok) {
         Serial.println("REJECTED: pins <fwd> <back> <left> <right>, four different pins from "
-                       "1 2 4-18 21 39-42 47 (see PIN RULES in the source)");
+                       "1 2 4-18 21 39-42 45 46 47 (see PIN RULES in the source)");
       } else {
         releaseAll();
         for (int b = 0; b < 4; b++) {

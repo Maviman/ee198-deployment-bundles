@@ -28,6 +28,10 @@
   button.act { border: 1px solid var(--line); background: #1c2129; color: var(--text); border-radius: 6px;
                font: 700 13px system-ui; padding: 10px 16px; cursor: pointer; letter-spacing: .06em; }
   button.act:disabled { opacity: .4; cursor: not-allowed; }
+  .fleet { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
+  .fleet label { color: var(--dim); font-size: 12px; display: flex; gap: 6px; align-items: center; }
+  .fleet select { background: #1c2129; color: var(--text); border: 1px solid var(--line); border-radius: 6px;
+    padding: 4px 6px; font: inherit; max-width: 260px; }
   button.act.go { background: var(--ok); color: #04210b; border-color: var(--ok); }
   button.act.confirm { background: var(--warn); color: #231a00; border-color: var(--warn); }
   .checks { font: 12px var(--mono); display: grid; gap: 3px; }
@@ -110,6 +114,12 @@
   <div class="row3">
     <section class="panel">
       <h2>Ready to start? <span class="sub" id="readysub"></span></h2>
+      <div class="fleet" title="How many cars drive, and with which model. A model's car count is fixed by its training, so the model list follows the car count. APPLY saves it (arena fleet) and restarts the controller and the camera service with it (arena up --restart); the cars stay DISARMED.">
+        <label>cars <select id="fleetcars"></select></label>
+        <label>model <select id="fleetmodel"></select></label>
+        <button class="act" id="fleetapply">APPLY</button>
+        <span class="sub" id="fleetsub"></span>
+      </div>
       <div class="checks" id="checks"></div>
       <div class="sub" id="runinfo" style="margin-top:8px"></div>
       <div id="initlog"></div>
@@ -141,7 +151,86 @@
 <script>
 const $ = (id) => document.getElementById(id);
 const COLORS = { vision: "#58a6ff", control: "#a371f7", radio: "#3fb950" };
-let S = null, videoOn = false;
+let S = null;
+
+// ---- overhead camera: always live -------------------------------------------------------
+// /video.mjpg is read with fetch() instead of an <img src>, so the page, not the browser,
+// decides what is shown: each read paints only the NEWEST complete frame it holds (a backlog
+// is dropped, never played out late), every frame's age is known from the hub's X-Frame-Time
+// part header, and the stream is reopened by itself when it errors, ends, stalls for 3 s or
+// falls more than 1.5 s behind. It runs from page load whether or not telemetry says vision
+// is up, so the picture returns the moment the vision service does.
+const cam = { on: false, frameAt: 0, lag: null, offset: null, frames: 0, reconnects: 0, reason: "connecting" };
+const camUrls = [];
+function camShow(jpg, frameTimeMs) {
+  const url = URL.createObjectURL(new Blob([jpg], { type: "image/jpeg" }));
+  $("video").src = url;
+  camUrls.push(url);
+  while (camUrls.length > 3) URL.revokeObjectURL(camUrls.shift());
+  const now = Date.now();
+  cam.frameAt = now; cam.on = true; cam.frames++;
+  if (frameTimeMs) {
+    // Hub clock vs this browser's: the smallest age seen counts as "no lag" (it may creep up
+    // 2 ms per frame so clock drift cannot wedge it); the excess over that is the lag.
+    const age = now - frameTimeMs;
+    cam.offset = cam.offset == null ? age : Math.min(age, cam.offset + 2);
+    cam.lag = age - cam.offset;
+  }
+}
+function indexOfSeq(buf, seq, from) {
+  outer: for (let i = from; i <= buf.length - seq.length; i++) {
+    for (let j = 0; j < seq.length; j++) if (buf[i + j] !== seq[j]) continue outer;
+    return i;
+  }
+  return -1;
+}
+const HDR_END = new Uint8Array([13, 10, 13, 10]);
+async function camLoop() {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const td = new TextDecoder();
+  while (true) {
+    const ctrl = new AbortController();
+    let lastByteAt = Date.now();
+    const guard = setInterval(() => {
+      if (Date.now() - lastByteAt > 3000) { cam.reason = "no frames for 3 s"; ctrl.abort(); }
+      else if (cam.lag != null && cam.lag > 1500) { cam.reason = `picture ${(cam.lag / 1000).toFixed(1)} s behind`; ctrl.abort(); }
+    }, 500);
+    try {
+      const resp = await fetch("/video.mjpg?" + Date.now(), { cache: "no-store", signal: ctrl.signal });
+      if (!resp.ok || !resp.body) throw new Error("HTTP " + resp.status);
+      const reader = resp.body.getReader();
+      let buf = new Uint8Array(0);
+      cam.lag = null; cam.offset = null;
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        lastByteAt = Date.now();
+        const nb = new Uint8Array(buf.length + value.length); nb.set(buf); nb.set(value, buf.length); buf = nb;
+        let newest = null;
+        while (true) {
+          const he = indexOfSeq(buf, HDR_END, 0);
+          if (he < 0) break;
+          const head = td.decode(buf.subarray(0, he));
+          const len = +(head.match(/Content-Length:\s*(\d+)/i) || [])[1];
+          const ft = +(head.match(/X-Frame-Time:\s*(\d+)/i) || [])[1];
+          if (!len) { buf = buf.subarray(he + 4); continue; }      // not a frame part: skip it
+          if (buf.length < he + 4 + len) break;                    // frame still arriving
+          newest = { jpg: buf.slice(he + 4, he + 4 + len), t: ft || 0 };
+          buf = buf.subarray(he + 4 + len);                        // older frames in this read are dropped
+        }
+        if (newest) camShow(newest.jpg, newest.t);
+        if (buf.length > 4_000_000) buf = new Uint8Array(0);
+      }
+      cam.reason = "stream ended";
+    } catch (e) {
+      if (!ctrl.signal.aborted) cam.reason = String(e && e.message || e);
+    }
+    clearInterval(guard);
+    cam.on = false; cam.reconnects++;
+    await sleep(1000);
+  }
+}
+camLoop();
 
 let stopError = null;
 $("stop").onclick = async () => {
@@ -162,8 +251,9 @@ $("stop").onclick = async () => {
 // START / INITIALIZE. The hub re-checks everything and answers 403 unless this page is open on the
 // control Orin itself; the X-Arena header is what keeps another web page from pressing them for you.
 let actionMsg = null, startConfirmUntil = 0;
-async function post(path) {
-  const r = await fetch(path, { method: "POST", headers: { "X-Arena": "control" } });
+async function post(path, body) {
+  const r = await fetch(path, { method: "POST", headers: { "X-Arena": "control", ...(body ? { "Content-Type": "application/json" } : {}) },
+                               body: body ? JSON.stringify(body) : undefined });
   let j = {};
   try { j = await r.json(); } catch (e) { /* no body */ }
   return { ok: r.ok, j };
@@ -178,6 +268,46 @@ for (const [id, path, label] of [["init", "/api/init", "INITIALIZE"], ["scan", "
     if (S) render();
   };
 }
+// Fleet menu: the car count and the model come from the hub (`arena fleet --json`). The menus keep
+// the operator's choice until APPLY; APPLY = arena fleet --pursuers N --model M, then arena up --restart.
+let fleetSig = null, carsPick = null, modelPick = null;
+function fillModels() {
+  const n = +$("fleetcars").value, f = S.fleet || {};
+  const ms = (f.models || []).filter((m) => m.pursuers === n);
+  $("fleetmodel").innerHTML = ms.map((m) => `<option value="${m.name}">${m.name.replace(/^models\//, "")}</option>`).join("")
+    || `<option value="">no installed model drives ${n} car(s)</option>`;
+  $("fleetmodel").value = ms.some((m) => m.name === modelPick) ? modelPick
+    : ms.some((m) => m.name === f.model) ? f.model : (ms[0] || {}).name || "";
+}
+function renderFleet() {
+  const f = S.fleet || {}, models = f.models || [];
+  const sig = JSON.stringify([f.model, f.pursuers, models]);
+  if (sig !== fleetSig) {
+    fleetSig = sig;
+    const counts = [...new Set(models.map((m) => m.pursuers).filter((k) => k != null))].sort((a, b) => a - b);
+    $("fleetcars").innerHTML = counts.map((k) => `<option value="${k}">${k} car${k === 1 ? "" : "s"}</option>`).join("")
+      || `<option value="">no models installed</option>`;
+    $("fleetcars").value = counts.includes(carsPick) ? String(carsPick) : String(f.pursuers ?? counts[0] ?? "");
+    fillModels();
+  }
+  const c = S.control, running = c && fresh("control") && c.model;
+  const short = (m) => String(m || "").replace(/^models\//, "");
+  const mismatch = running && f.model && short(running) !== short(f.model) && !String(running).endsWith(f.model);
+  $("fleetsub").textContent = f.model
+    ? `set: ${f.pursuers} car${f.pursuers === 1 ? "" : "s"} · ${short(f.model)}` + (mismatch ? ` · the controller still runs ${short(running)}: APPLY restarts it` : "")
+    : f.error ? "fleet: " + f.error : "fleet: reading…";
+}
+$("fleetcars").onchange = () => { carsPick = +$("fleetcars").value; fillModels(); };
+$("fleetmodel").onchange = () => { modelPick = $("fleetmodel").value; };
+$("fleetapply").onclick = async () => {
+  actionMsg = null; $("fleetapply").disabled = true;
+  try {
+    const { ok, j } = await post("/api/fleet", { pursuers: $("fleetcars").value, model: $("fleetmodel").value });
+    if (!ok) actionMsg = "APPLY refused: " + (j.error || "unknown");
+    else { carsPick = null; modelPick = null; }
+  } catch (e) { actionMsg = "hub unreachable: " + e; }
+  if (S) render();
+};
 $("start").onclick = async () => {
   if (Date.now() > startConfirmUntil) {           // first click only asks; the second, within 5 s, arms
     startConfirmUntil = Date.now() + 5000;
@@ -321,8 +451,15 @@ function render() {
   $("start").textContent = armedNow ? `ARMED · ${Math.ceil(run.remaining_s ?? 0)} s` : confirming ? "CONFIRM: AREA CLEAR?" : "START";
   $("start").title = !canCtl ? "START only works from a browser on the control Orin itself"
     : !rd.ok ? "not ready: see \"Ready to start?\" below" : "ARM the car: the policy drives. Click twice within 5 s.";
-  const jobLabel = job.kind === "scan" ? "calibrate" : "initialize";
+  const jobLabel = job.kind === "scan" ? "calibrate" : job.kind === "fleet" ? "apply fleet" : "initialize";
   $("init").disabled = $("scan").disabled = !(canCtl && S.can_init) || armedNow || !!job.running;
+  renderFleet();
+  $("fleetapply").disabled = !(canCtl && S.can_init) || armedNow || !!job.running || !$("fleetmodel").value;
+  $("fleetapply").textContent = job.running && job.kind === "fleet" ? "APPLYING…" : "APPLY";
+  $("fleetapply").title = !canCtl ? "APPLY only works from a browser on the control Orin itself"
+    : !S.can_init ? "this hub was started without --arena-cli: run ./arena fleet in a terminal"
+    : armedNow ? "the car is ARMED: press STOP first"
+    : "Save this fleet (arena fleet) and restart the controller and the camera service with it (arena up --restart); the cars stay DISARMED";
   $("init").textContent = job.running && job.kind === "init" ? "INITIALIZING…" : "INITIALIZE";
   $("scan").textContent = job.running && job.kind === "scan" ? "CALIBRATING…" : "CALIBRATE";
   $("init").title = !canCtl ? "INITIALIZE only works from a browser on the control Orin itself"
@@ -361,10 +498,13 @@ function render() {
     ? al.map((a) => `<div class="alert ${a.level}">${a.text}</div>`).join("")
     : `<div class="alert okay">all nominal</div>`;
 
-  if (S.preview && fresh("vision") && !videoOn) { $("video").src = "/video.mjpg?" + Date.now(); videoOn = true; }
-  if (!fresh("vision") && videoOn) { $("video").removeAttribute("src"); videoOn = false; }
-  $("novideo").style.display = videoOn ? "none" : "grid";
-  if (v) $("camsub").textContent = `${v.mode} · ${v.fps} fps · ${v.source}`;
+  const camLive = cam.on && Date.now() - cam.frameAt < 3000;
+  $("novideo").style.display = camLive ? "none" : "grid";
+  $("novideo").textContent = !S.preview ? "no preview configured on the hub"
+    : !fresh("vision") ? "no camera: vision service not running (INITIALIZE starts it)"
+    : cam.reconnects ? `camera: reconnecting (${cam.reason})…` : "camera: connecting…";
+  if (v) $("camsub").textContent = `${v.mode} · ${v.fps} fps · ${v.source}`
+    + (camLive && cam.lag != null ? (cam.lag < 150 ? " · preview live" : ` · preview ${(cam.lag / 1000).toFixed(1)} s behind`) : "");
 
   // latency breakdown
   const vis = c && c.lat_ms && c.lat_ms.vision && c.lat_ms.vision.p50;

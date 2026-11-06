@@ -360,6 +360,11 @@ def cmd_fleet(args, cfg: Config) -> None:
         cfg = Config()
     n = resolve_fleet(cfg, cfg.model)
     tags = fleet_tags()
+    if getattr(args, "json", False):
+        # machine-readable, for the dashboard's fleet menu (deploy/hub.py); one line, printed last
+        print(json.dumps({"model": cfg.model, "pursuers": n, "setting": cfg.pursuers, "tags": tags,
+                          "models": [{"name": m, "pursuers": k} for m, k in installed_models()]}))
+        return
     step(f"fleet: {n} pursuer(s), model {cfg.model}"
          + ("" if cfg.pursuers == "auto" else f"  ([fleet] pursuers = {cfg.pursuers})"))
     for i in range(n):
@@ -678,6 +683,12 @@ def cmd_up(args, cfg: Config) -> None:
     vis_addr = "127.0.0.1" if cfg.single else (
         v.host if cfg.vision_addr_from_control == "auto" else cfg.vision_addr_from_control)
 
+    if getattr(args, "restart", False):
+        # svc_start leaves a running service alone, so a new model or car count needs this
+        _ctl(cfg, "disarm")
+        step("restarting the controller and the camera service with this fleet")
+        run_on(c, "svc_stop controller", lib=True, timeout=30)
+        run_on(v, "svc_stop vision", lib=True, timeout=30)
     step(f"control: {c.target} -- hub + controller ({model}: {n} pursuer(s), cars {esp}) DISARMED")
     run_on(c, f'''
 svc_start hub . {c.tools_python} -u deploy/hub.py --port {cfg.dash_port} --telemetry-port {cfg.tel_port} \
@@ -972,6 +983,7 @@ def main(argv=None) -> None:
     p = sub.add_parser("fleet", help="how many pursuers drive, and which model; --pursuers / --model change it")
     p.add_argument("--pursuers", help="number of pursuer cars (1, 2, 3, ...) or auto (= the model's own count)")
     p.add_argument("--model", help="the model to drive with, e.g. models/n1_catch")
+    p.add_argument("--json", action="store_true", help="print the fleet and the installed models as JSON")
     p.set_defaults(fn=cmd_fleet)
     p = sub.add_parser("sync", help="put both Orins on this checkout's commit and run the selftests")
     p.add_argument("--push", action="store_true", help="git push this branch first")
@@ -1005,6 +1017,9 @@ def main(argv=None) -> None:
                                  "ip:port and serial:<device>[@baud] for cars on a UART cable)")
     p.add_argument("--pursuers", help="override [fleet] pursuers for this session (must match the model)")
     p.add_argument("--wait", type=float, default=25.0, help="seconds to wait for a healthy pipeline")
+    p.add_argument("--restart", action="store_true",
+                   help="stop the controller and the camera service first, so a changed fleet "
+                        "(model / car count) takes effect; the hub keeps running")
     p.set_defaults(fn=cmd_up)
     sub.add_parser("go", help="ARM: the policy drives the cars").set_defaults(fn=cmd_go)
     sub.add_parser("halt", help="DISARM: E-stop every car, keep services running").set_defaults(fn=cmd_halt)

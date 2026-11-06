@@ -94,9 +94,12 @@ class Rig:
             self.hub.ingest(dict(self.control))
             time.sleep(0.1)
 
-    def post(self, path, headers=None):
-        h = {"X-Arena": "control"} if headers is None else headers
-        req = urllib.request.Request(self.base + path, method="POST", headers=h, data=b"")
+    def post(self, path, headers=None, data=None):
+        h = dict({"X-Arena": "control"} if headers is None else headers)
+        body = b""
+        if data is not None:
+            body, h["Content-Type"] = json.dumps(data).encode(), "application/json"
+        req = urllib.request.Request(self.base + path, method="POST", headers=h, data=body)
         try:
             with urllib.request.urlopen(req, timeout=5) as r:
                 return r.status, json.loads(r.read())
@@ -347,3 +350,38 @@ def test_the_latest_scan_snapshot_is_served(rig, tmp_path):
     with urllib.request.urlopen(r.base + "/api/scan.png", timeout=5) as resp:
         assert resp.read() == b"\x89PNG new" and resp.headers["Content-Type"] == "image/png"
     assert r.state()["scan_png"] == pytest.approx(new.stat().st_mtime)
+
+
+FLEET_CLI = (
+    'if [ "$1 $2" = "fleet --json" ]; then echo \'{"model":"models/n1_catch","pursuers":1,"tags":[1,2,3],'
+    '"models":[{"name":"models/n1_catch","pursuers":1},{"name":"models/c37","pursuers":3}]}\'; exit 0; fi\n'
+    'echo "arena $*"; exit 0\n')
+
+
+def test_the_fleet_menu_reads_the_arena_cli_and_apply_saves_then_restarts(rig, tmp_path):
+    r = rig(arena_cli=script(tmp_path, FLEET_CLI))
+    for _ in range(50):
+        fleet = r.state()["fleet"]
+        if fleet.get("model"):
+            break
+        time.sleep(0.1)
+    assert fleet["pursuers"] == 1 and [m["name"] for m in fleet["models"]] == ["models/n1_catch", "models/c37"]
+    assert r.post("/api/fleet", data={"pursuers": "3", "model": "models/c37"}) == (200, {"started": True})
+    for _ in range(50):
+        job = r.state()["init"]
+        if not job["running"]:
+            break
+        time.sleep(0.1)
+    assert job["kind"] == "fleet" and job["ok"] is True
+    assert "arena fleet --pursuers 3 --model models/c37" in job["lines"], "the CLI validates and saves it"
+    assert "arena up --restart" in job["lines"], "then the controller and camera service restart with it"
+
+
+def test_apply_refuses_bad_input_and_strangers(rig, tmp_path, monkeypatch):
+    r = rig(arena_cli=script(tmp_path, FLEET_CLI))
+    assert r.post("/api/fleet", data={"pursuers": "3", "model": "../../etc/passwd"})[0] == 400
+    assert r.post("/api/fleet", data={"pursuers": "0", "model": "models/x"})[0] == 400
+    assert r.post("/api/fleet", data={"pursuers": "3", "model": "models/x"}, headers={})[0] == 403
+    monkeypatch.setattr(hubmod, "is_local", lambda addr: False)
+    assert r.post("/api/fleet", data={"pursuers": "3", "model": "models/x"})[0] == 403
+    assert r.state()["init"]["started"] is None, "nothing ran"

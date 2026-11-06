@@ -10,7 +10,8 @@ never slow a pose frame or a command.
     GET  /                 the dashboard
     GET  /api/state        everything, as JSON (the terminal monitor polls this)
     GET  /video.mjpg       the camera, proxied from the vision Orin (one upstream
-                           connection however many people are watching)
+                           connection however many people are watching); each part
+                           carries X-Frame-Time (unix ms) so a viewer can measure lag
     POST /api/stop         disarm: every car gets E-stop on the next packet.
                            Open to anyone who can reach the page: stopping is
                            always safe.
@@ -30,6 +31,9 @@ never slow a pose frame or a command.
                                driving by itself when it reappears.
                            /api/init runs `<--arena-cli> up`: starts whatever is not
                            running and leaves the cars DISARMED.
+    POST /api/fleet        APPLY in the fleet menu, same rules as /api/init: body
+                           {"pursuers": N, "model": "models/<name>"} runs `arena fleet
+                           --pursuers N --model M`, then `arena up --restart`.
     POST /api/scan         CALIBRATE, same rules as /api/init: `<--arena-cli> scan` (it
                            disarms first), then `arena up` to restore the camera service.
     GET  /api/scan.png     the annotated snapshot of the latest scan.
@@ -42,6 +46,7 @@ import json
 import math
 import os
 import re
+import shlex
 import socket
 import subprocess
 import threading
@@ -129,6 +134,7 @@ class Hub:
         # camera proxy
         self.jpeg: bytes | None = None
         self.jpeg_seq = 0
+        self.jpeg_at = 0.0          # when the newest frame reached the hub (unix s)
         self.jpeg_cond = threading.Condition()
         self.viewers = 0
         self._proxy_thread: threading.Thread | None = None
@@ -140,7 +146,12 @@ class Hub:
         # time, since both take the camera; "kind" says which is in the slot
         self.init_lock = threading.Lock()
         self.init_job = {"kind": None, "running": False, "started": None, "finished": None, "ok": None,
-                         "rc": None, "lines": [], "summary": []}
+                         "rc": None, "lines": [], "summary": [], "args": []}
+        # the dashboard's fleet menu: `arena fleet --json` (current model, car count, installed
+        # models), refreshed in the background and after every job
+        self.fleet: dict = {}
+        if getattr(args, "arena_cli", ""):
+            threading.Thread(target=self._fleet_thread, daemon=True).start()
         # where `arena scan` leaves its annotated snapshot: copied next to the arena CLI when
         # the camera is on the other Orin, written to ~/.arena/scan when it is on this one
         cli = getattr(args, "arena_cli", "")
@@ -297,6 +308,7 @@ class Hub:
                 "can_control": bool(client_local),
                 "can_init": bool(getattr(self.args, "arena_cli", "")),
                 "ready": ready, "run": run, "init": dict(self.init_job, lines=self.init_job["lines"][-14:]),
+                "fleet": self.fleet,
                 "scan_png": (lambda q: q.stat().st_mtime if q else None)(self.scan_png()),
             }
 
@@ -449,16 +461,50 @@ class Hub:
         The job still reports the scan's failure."""
         return self._start_job("scan")
 
-    # kind -> (button, [(arena subcommand, time limit s, run even if an earlier step failed)])
-    JOBS = {"init": ("INITIALIZE", [("up", 150, False)]),
-            "scan": ("CALIBRATE", [("scan", 150, False), ("up", 150, True)])}
+    def set_fleet(self, body) -> tuple[int, dict]:
+        """APPLY in the fleet menu: `<arena-cli> fleet --pursuers N --model M` (the CLI checks
+        that the model drives that many cars, then saves it), then `<arena-cli> up --restart`
+        so the controller and the camera service run with it. The cars stay DISARMED."""
+        body = body if isinstance(body, dict) else {}
+        model, pursuers = str(body.get("model") or ""), str(body.get("pursuers") or "auto")
+        if not re.fullmatch(r"models/[A-Za-z0-9_.-]+", model):
+            return 400, {"error": f"not an installed model name: {model!r}"}
+        if not (pursuers == "auto" or (pursuers.isdigit() and 1 <= int(pursuers) <= 9)):
+            return 400, {"error": f"the car count must be 1-9 or auto, not {pursuers!r}"}
+        return self._start_job("fleet", ["--pursuers", pursuers, "--model", model])
 
-    def _start_job(self, kind: str) -> tuple[int, dict]:
+    def refresh_fleet(self) -> None:
+        cli = getattr(self.args, "arena_cli", "")
+        if not cli:
+            return
+        try:
+            p = subprocess.run([cli, "fleet", "--json"], cwd=os.path.dirname(os.path.abspath(cli)) or None,
+                               stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
+            line = next((ln for ln in reversed(p.stdout.splitlines()) if ln.startswith("{")), "")
+            if line:
+                self.fleet = dict(json.loads(line), at=time.time())
+            elif p.returncode != 0:
+                self.fleet = dict(self.fleet, error=ANSI.sub("", (p.stdout + p.stderr).strip())[-300:])
+        except (OSError, subprocess.SubprocessError, ValueError) as exc:
+            self.fleet = dict(self.fleet, error=str(exc))
+
+    def _fleet_thread(self) -> None:
+        while True:
+            self.refresh_fleet()
+            time.sleep(20)
+
+    # kind -> (button, [(arena subcommand, time limit s, run even if an earlier step failed)]);
+    # "{args}" takes the arguments the request supplied (set_fleet)
+    JOBS = {"init": ("INITIALIZE", [("up", 150, False)]),
+            "scan": ("CALIBRATE", [("scan", 150, False), ("up", 150, True)]),
+            "fleet": ("APPLY", [("fleet {args}", 30, False), ("up --restart", 150, False)])}
+
+    def _start_job(self, kind: str, extra: list[str] | None = None) -> tuple[int, dict]:
         label = self.JOBS[kind][0]
         cli = getattr(self.args, "arena_cli", "")
         if not cli:
             return 501, {"error": "this hub was started without --arena-cli (or ARENA_CLI): "
-                                  f"run `./arena {self.JOBS[kind][1][0][0]}` in a terminal instead"}
+                                  f"run `./arena {self.JOBS[kind][1][0][0].split()[0]}` in a terminal instead"}
         c = self.latest.get("control")
         if c and c.get("armed") and time.time() - self.rx_at.get("control", 0) < 2.0:
             return 409, {"error": "the car is ARMED: press STOP first"}
@@ -467,9 +513,10 @@ class Hub:
                 busy = self.JOBS[self.init_job["kind"]][0]
                 return 409, {"error": f"{busy} is already running"}
             self.init_job.update(kind=kind, running=True, started=time.time(), finished=None,
-                                 ok=None, rc=None, lines=[], summary=[])
+                                 ok=None, rc=None, lines=[], summary=[], args=list(extra or []))
         threading.Thread(target=self._run_job, args=(cli, kind), daemon=True).start()
-        self.event(f"{label} pressed: " + " then ".join(f"arena {s[0]}" for s in self.JOBS[kind][1]))
+        self.event(f"{label} pressed: " + " then ".join(
+            f"arena {s[0].format(args=shlex.join(extra or []))}" for s in self.JOBS[kind][1]))
         return 200, {"started": True}
 
     def _run_job(self, cli: str, kind: str) -> None:
@@ -478,12 +525,13 @@ class Hub:
         for i, (sub, limit, always) in enumerate(steps):
             if first_bad != 0 and not always:
                 break
+            sub = sub.format(args=shlex.join(self.init_job.get("args") or []))
             if i:
                 lines.append(f"--- arena {sub} ---")
             rc, deadline, key = None, time.time() + limit, []
             try:
                 # stdin closed: `arena scan` uses `ssh -t`, which must never wait for a keyboard
-                p = subprocess.Popen([cli, sub], cwd=os.path.dirname(os.path.abspath(cli)) or None,
+                p = subprocess.Popen([cli] + shlex.split(sub), cwd=os.path.dirname(os.path.abspath(cli)) or None,
                                      stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                      stderr=subprocess.STDOUT, text=True, errors="replace")
                 for line in p.stdout:
@@ -508,6 +556,7 @@ class Hub:
         rc = first_bad
         self.init_job.update(running=False, finished=time.time(), rc=rc, ok=(rc == 0))
         self.event(f"{label} finished: " + ("ok" if rc == 0 else f"needs attention (exit {rc})"))
+        self.refresh_fleet()
 
     def scan_png(self) -> Path | None:
         """The newest annotated snapshot `arena scan` left behind, if any."""
@@ -536,7 +585,7 @@ class Hub:
                                 break
                             jpg, buf = buf[start:end + 2], buf[end + 2:]
                             with self.jpeg_cond:
-                                self.jpeg, self.jpeg_seq = jpg, self.jpeg_seq + 1
+                                self.jpeg, self.jpeg_seq, self.jpeg_at = jpg, self.jpeg_seq + 1, time.time()
                                 self.jpeg_cond.notify_all()
             except OSError:
                 time.sleep(1.0)
@@ -544,7 +593,7 @@ class Hub:
 
     def watch(self):
         self.viewers += 1
-        if self._proxy_thread is None and self.args.preview:
+        if (self._proxy_thread is None or not self._proxy_thread.is_alive()) and self.args.preview:
             self._proxy_thread = threading.Thread(target=self._proxy, daemon=True)
             self._proxy_thread.start()
 
@@ -600,10 +649,18 @@ def make_handler(hub: Hub):
             else:
                 self._send(404, b"not found", "text/plain")
 
+        def _body(self):
+            """The request's JSON body, or {}."""
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+                return json.loads(self.rfile.read(n)) if 0 < n < 65536 else {}
+            except (ValueError, OSError):
+                return {}
+
         def do_POST(self):
             if self.path.startswith("/api/stop"):
                 self._json(200, hub.disarm())
-            elif self.path.startswith(("/api/arm", "/api/init", "/api/scan")):
+            elif self.path.startswith(("/api/arm", "/api/init", "/api/scan", "/api/fleet")):
                 why = self._may_control()
                 if why:
                     self._json(403, {"error": why})
@@ -611,6 +668,8 @@ def make_handler(hub: Hub):
                     self._json(*hub.arm())
                 elif self.path.startswith("/api/scan"):
                     self._json(*hub.calibrate())
+                elif self.path.startswith("/api/fleet"):
+                    self._json(*hub.set_fleet(self._body()))
                 else:
                     self._json(*hub.initialize())
             else:
@@ -625,6 +684,13 @@ def make_handler(hub: Hub):
             self.send_header("Cache-Control", "no-store")
             self.send_header("Connection", "close")
             self.end_headers()
+            # A small send buffer: a viewer that cannot keep up blocks the write, and the
+            # next frame it gets is the newest one, instead of a backlog played out late.
+            try:
+                self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 256 * 1024)
+                self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            except OSError:
+                pass
             hub.watch()
             last = 0
             try:
@@ -634,9 +700,11 @@ def make_handler(hub: Hub):
                             hub.jpeg_cond.wait(2.0)
                         if hub.jpeg_seq <= last:
                             continue
-                        jpg, last = hub.jpeg, hub.jpeg_seq
+                        jpg, last, at = hub.jpeg, hub.jpeg_seq, hub.jpeg_at
+                    # X-Frame-Time lets the dashboard measure how far behind its picture is.
                     self.wfile.write(b"--f\r\nContent-Type: image/jpeg\r\nContent-Length: "
-                                     + str(len(jpg)).encode() + b"\r\n\r\n" + jpg + b"\r\n")
+                                     + str(len(jpg)).encode() + b"\r\nX-Frame-Time: "
+                                     + str(int(at * 1000)).encode() + b"\r\n\r\n" + jpg + b"\r\n")
             except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
                 pass
             finally:

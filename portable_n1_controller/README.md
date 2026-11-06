@@ -15,6 +15,7 @@ python selftest.py                  # must print SELFTEST PASSED before anything
 | Path | What it is |
 |---|---|
 | `models/n1_catch/`, `models/n1_pin/` | The two frozen V1 single-pursuer policies as verified ONNX exports (+ manifest + training/eval metrics). |
+| `models/rc16_n1_two_camera/` | **One pursuer, the MotorDayz 1:16 toy car, 8 × 8 ft arena, PWM** (runtime `rc16_n1_v1`). Trained in Isaac Sim on the rc16 car model with observations through the two-corner-camera pose emulator, so it needs only (x, y, heading) of both cars. Sim: catch 1.000 over 256 episodes on the emulator, truth, and randomized actuation. Read its README before the first run (throttle limit, steering, arena frame). |
 | `models/c38_8ft_buttons/` | The 3-pursuer hive role commander retrained for the 8 × 8 ft arena with the V3 button firmware in the loop (manifest `"runtime": "hive_commander_v1"`, `actuation`: buttons modulated, 40 ms, limit 0.6). The one to use; set the perception arena to 8 ft first. |
 | `models/c37_commit3_ft_g997_arena183/`, `models/c37_commit3_ft_g997/` | The older 3-pursuer hive role commander (manifest `"runtime": "hive_commander_v1"`), scaled to the 1.83 m arena and as trained (6 m), run by `pc_controller/runtimes/hive_commander_v1.py`; `golden_vectors.json` pins each in `selftest.py`. Read their READMEs for the transfer gaps. |
 | `pc_controller/loops.py` | Picks the loop a model needs from its manifest: `PortableLoop` for flat policies, `HiveLoop` for role commanders. |

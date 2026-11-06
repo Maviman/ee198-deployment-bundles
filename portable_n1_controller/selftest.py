@@ -122,6 +122,8 @@ def replay_runtime_goldens(model_dir: Path, runtime: str) -> list[str]:
         for tick in ep["ticks"]:
             rt.step(np.asarray(tick["pursuers"]), np.asarray(tick["evader"]), float(g.get("dt", 0.1)))
             for k in worst:
+                if k not in tick:           # a runtime without role heads (rc16_n1_v1) records obs + command only
+                    continue
                 err = float(np.abs(np.asarray(rt.last[k], dtype=np.float64) - np.asarray(tick[k])).max())
                 worst[k] = max(worst[k], err)
             role_mismatch += rt.last["roles"] != tick["roles"]

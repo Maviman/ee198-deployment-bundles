@@ -19,7 +19,7 @@ import time
 import types
 import urllib.error
 import urllib.request
-from http.server import ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -73,10 +73,11 @@ def healthy():
 
 
 class Rig:
-    def __init__(self, tmp_path, *, cap_s=120.0, arena_cli="", ctl=True) -> None:
+    def __init__(self, tmp_path, *, cap_s=120.0, arena_cli="", ctl=True, feeds="") -> None:
         self.fc = FakeController()
         args = types.SimpleNamespace(telemetry_port=0, control_port=self.fc.port, preview="",
-                                     run_dir=str(tmp_path / "runs"), arena_cli=arena_cli, run_cap_s=cap_s)
+                                     run_dir=str(tmp_path / "runs"), arena_cli=arena_cli, run_cap_s=cap_s,
+                                     feeds=feeds)
         self.hub = hubmod.Hub(args)
         self.vision, self.control = healthy()
         self.alive = True
@@ -385,3 +386,101 @@ def test_apply_refuses_bad_input_and_strangers(rig, tmp_path, monkeypatch):
     monkeypatch.setattr(hubmod, "is_local", lambda addr: False)
     assert r.post("/api/fleet", data={"pursuers": "3", "model": "models/x"})[0] == 403
     assert r.state()["init"]["started"] is None, "nothing ran"
+
+
+class FakeFeed:
+    """tools/camera_feeds.py serve for one camera: /info.json, and a stream whose parts carry X-Tags."""
+
+    INFO = {"index": 1, "name": "Webcam(X1)", "mode": "1280x720@30", "floor_px": 21.0, "roles": {"10": "corner"}}
+
+    def __init__(self) -> None:
+        frames = [(b"\xff\xd8frame%d\xff\xd9" % i, b'{"ms":4.2,"d":[[10,24.0,1,2,3,4,5,6,7,%d]]}' % i)
+                  for i in range(3)]
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *_a):
+                pass
+
+            def do_GET(self):
+                if self.path.startswith("/info"):
+                    body = json.dumps(FakeFeed.INFO).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=arenaframe")
+                self.end_headers()
+                try:
+                    while True:
+                        for jpg, tags in frames:
+                            self.wfile.write(b"--arenaframe\r\nContent-Type: image/jpeg\r\nContent-Length: %d\r\n"
+                                             b"X-Frame-Time: 1\r\nX-Tags: %s\r\n\r\n%s\r\n" % (len(jpg), tags, jpg))
+                            time.sleep(0.05)
+                except OSError:
+                    pass
+
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.httpd.daemon_threads = True
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+        self.url = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+
+
+def closed_port_url() -> str:
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return f"http://127.0.0.1:{port}"
+
+
+def read_part(resp) -> tuple[dict, bytes]:
+    """One multipart part from the hub: its headers and body."""
+    headers = {}
+    while True:
+        line = resp.readline().strip()
+        if not line:
+            if headers:
+                break
+            continue
+        if b":" in line:
+            k, v = line.split(b":", 1)
+            headers[k.decode().lower()] = v.strip().decode()
+    return headers, resp.read(int(headers["content-length"]))
+
+
+def test_without_feeds_the_state_lists_none_and_a_feed_url_is_404(rig):
+    r = rig()
+    assert r.state()["feeds"] == []
+    with pytest.raises(urllib.error.HTTPError) as e:
+        urllib.request.urlopen(r.base + "/feed/0.mjpg", timeout=5)
+    assert e.value.code == 404
+
+
+def test_the_state_says_which_corner_camera_feeds_are_up(rig):
+    feed = FakeFeed()
+    r = rig(feeds=f"{feed.url},{closed_port_url()}")
+    deadline = time.time() + 3
+    while time.time() < deadline and not r.state()["feeds"][0]["up"]:
+        time.sleep(0.05)
+    feeds = r.state()["feeds"]
+    assert feeds[0] == {"i": 0, "up": True, "info": FakeFeed.INFO}
+    assert feeds[1] == {"i": 1, "up": False, "info": None}
+
+
+def test_a_feed_is_relayed_with_each_frames_own_tags(rig):
+    feed = FakeFeed()
+    r = rig(feeds=feed.url)
+    with urllib.request.urlopen(r.base + "/feed/0.mjpg", timeout=5) as resp:
+        assert resp.headers["Content-Type"].startswith("multipart/x-mixed-replace")
+        for _ in range(4):
+            headers, body = read_part(resp)
+            n = int(body[len(b"\xff\xd8frame"):-2])
+            tags = json.loads(headers["x-tags"])
+            # the tags that came with frame n are frame n's, not a later frame's
+            assert tags["d"][0][0] == 10 and tags["d"][0][-1] == n and tags["ms"] == 4.2
+            assert abs(int(headers["x-frame-time"]) / 1000.0 - time.time()) < 5
+    with pytest.raises(urllib.error.HTTPError) as e:
+        urllib.request.urlopen(r.base + "/feed/1.mjpg", timeout=5)
+    assert e.value.code == 404

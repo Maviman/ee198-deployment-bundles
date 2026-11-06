@@ -12,6 +12,11 @@ never slow a pose frame or a command.
     GET  /video.mjpg       the camera, proxied from the vision Orin (one upstream
                            connection however many people are watching); each part
                            carries X-Frame-Time (unix ms) so a viewer can measure lag
+    GET  /feed/<i>.mjpg    the i-th --feeds camera (portable_orin_perception/tools/
+                           camera_feeds.py on the vision Orin: the cameras the vision
+                           service does not use), relayed the same way; each part also
+                           carries X-Tags, the tags found in THAT frame. /api/state's
+                           "feeds" says which are up, with each camera's name and mode.
     POST /api/stop         disarm: every car gets E-stop on the next packet.
                            Open to anyone who can reach the page: stopping is
                            always safe.
@@ -138,6 +143,8 @@ class Hub:
         self.jpeg_cond = threading.Condition()
         self.viewers = 0
         self._proxy_thread: threading.Thread | None = None
+        # the other cameras (camera_feeds.py on the vision Orin), each relayed on its own
+        self.feeds = [FeedRelay(u) for u in str(getattr(args, "feeds", "") or "").split(",") if u.strip()]
         # operator-started runs (the dashboard's START): see readiness() / run_watchdog()
         self.run = {"armed_at": None, "cap_s": float(getattr(args, "run_cap_s", 120.0)),
                     "halt_reason": None, "halt_at": None}
@@ -304,6 +311,7 @@ class Hub:
                 "events": list(self.events)[-12:],
                 "run_dir": str(self.run_dir),
                 "preview": bool(self.args.preview),
+                "feeds": [{"i": i, "up": f.up, "info": f.info} for i, f in enumerate(self.feeds)],
                 # the START / INITIALIZE buttons: who may press them, and whether they would work
                 "can_control": bool(client_local),
                 "can_init": bool(getattr(self.args, "arena_cli", "")),
@@ -601,6 +609,73 @@ class Hub:
         self.viewers -= 1
 
 
+class FeedRelay:
+    """One camera_feeds.py camera: its /info.json, polled every few seconds so the page
+    knows whether it is up, and one upstream /stream.mjpg connection while anyone watches.
+    Parts are split by their headers, not by JPEG markers, so X-Tags stays with its frame."""
+
+    INFO_EVERY_S = 3.0
+
+    def __init__(self, base_url: str) -> None:
+        self.base = base_url.rstrip("/")
+        self.info: dict | None = None
+        self.info_at = 0.0
+        self.part: tuple[bytes, bytes, float] | None = None     # (jpeg, X-Tags, arrival unix s)
+        self.seq = 0
+        self.cond = threading.Condition()
+        self.viewers = 0
+        self._thread: threading.Thread | None = None
+        threading.Thread(target=self._info_loop, daemon=True).start()
+
+    @property
+    def up(self) -> bool:
+        return self.info is not None and time.time() - self.info_at < 2.5 * self.INFO_EVERY_S
+
+    def _info_loop(self) -> None:
+        while True:
+            try:
+                with urllib.request.urlopen(self.base + "/info.json", timeout=2) as r:
+                    self.info, self.info_at = json.loads(r.read()), time.time()
+            except (OSError, ValueError):
+                pass
+            time.sleep(self.INFO_EVERY_S)
+
+    def _relay(self) -> None:
+        while self.viewers > 0:
+            try:
+                with urllib.request.urlopen(self.base + "/stream.mjpg", timeout=5) as r:
+                    while self.viewers > 0:
+                        length, tags = None, b"{}"
+                        while True:                              # part headers, up to the blank line
+                            line = r.readline()
+                            if not line:
+                                raise ConnectionError("feed ended")
+                            line = line.strip()
+                            if not line and length is not None:
+                                break
+                            low = line.lower()
+                            if low.startswith(b"content-length:"):
+                                length = int(line.split(b":", 1)[1])
+                            elif low.startswith(b"x-tags:"):
+                                tags = line.split(b":", 1)[1].strip()
+                        jpg = r.read(length)
+                        with self.cond:
+                            self.part, self.seq = (jpg, tags, time.time()), self.seq + 1
+                            self.cond.notify_all()
+            except (OSError, ValueError):
+                time.sleep(1.0)
+        self._thread = None
+
+    def watch(self) -> None:
+        self.viewers += 1
+        if self._thread is None or not self._thread.is_alive():
+            self._thread = threading.Thread(target=self._relay, daemon=True)
+            self._thread.start()
+
+    def unwatch(self) -> None:
+        self.viewers -= 1
+
+
 def make_handler(hub: Hub):
     page = (HERE / "dashboard.html").read_bytes()
 
@@ -640,6 +715,12 @@ def make_handler(hub: Hub):
                 self._json(200, hub.state(client_local=is_local(self.client_address[0])))
             elif self.path.startswith("/video.mjpg"):
                 self._stream()
+            elif re.match(r"/feed/\d+\.mjpg", self.path):
+                i = int(re.match(r"/feed/(\d+)", self.path).group(1))
+                if i < len(hub.feeds):
+                    self._feed_stream(hub.feeds[i])
+                else:
+                    self._send(404, b"no such feed", "text/plain")
             elif self.path.startswith("/api/scan.png"):
                 png = hub.scan_png()
                 if png is None:
@@ -711,6 +792,38 @@ def make_handler(hub: Hub):
                 hub.unwatch()
                 self.close_connection = True
 
+        def _feed_stream(self, feed: FeedRelay):
+            """Like _stream, for a --feeds camera; X-Tags rides along with its frame."""
+            self.send_response(200)
+            self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=f")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            try:
+                self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 256 * 1024)
+                self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            except OSError:
+                pass
+            feed.watch()
+            last = 0
+            try:
+                while True:
+                    with feed.cond:
+                        if feed.seq <= last:
+                            feed.cond.wait(2.0)
+                        if feed.seq <= last:
+                            continue
+                        (jpg, tags, at), last = feed.part, feed.seq
+                    self.wfile.write(b"--f\r\nContent-Type: image/jpeg\r\nContent-Length: "
+                                     + str(len(jpg)).encode() + b"\r\nX-Frame-Time: "
+                                     + str(int(at * 1000)).encode() + b"\r\nX-Tags: " + tags
+                                     + b"\r\n\r\n" + jpg + b"\r\n")
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
+                pass
+            finally:
+                feed.unwatch()
+                self.close_connection = True
+
     return Handler
 
 
@@ -720,6 +833,9 @@ def main() -> None:
     ap.add_argument("--telemetry-port", type=int, default=9871)
     ap.add_argument("--control-port", type=int, default=9872, help="the controller's localhost arm/disarm port")
     ap.add_argument("--preview", default="", help="vision preview base URL, e.g. http://10.42.0.1:8090")
+    ap.add_argument("--feeds", default="",
+                    help="comma-separated camera_feeds.py base URLs, e.g. http://10.42.0.1:8091,"
+                         "http://10.42.0.1:8092 (the cameras the vision service does not use)")
     ap.add_argument("--run-dir", default="~/.arena/runs")
     ap.add_argument("--arena-cli", default=os.environ.get("ARENA_CLI", ""),
                     help="path to the `arena` script; enables the INITIALIZE button (runs `arena up`). "

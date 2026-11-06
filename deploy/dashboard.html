@@ -55,6 +55,9 @@
   .cam img, .cam canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
   .cam .none { position: absolute; inset: 0; display: grid; place-items: center; color: var(--dim); }
   #map { width: 100%; aspect-ratio: 1; display: block; }
+  #feedpanel { grid-column: 1 / -1; }
+  .feeds { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); }
+  .feed .sub { font-family: var(--mono); margin-top: 4px; }
   .row3 { grid-column: 1 / -1; display: grid; gap: 12px;
           grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
   table { width: 100%; border-collapse: collapse; font: 12px var(--mono); }
@@ -111,6 +114,15 @@
     <h2>Arena <span class="sub" id="mapsub"></span></h2>
     <canvas id="map" width="600" height="600"></canvas>
   </section>
+  <section class="panel" id="feedpanel">
+    <h2>Corner cameras: tag check <span class="sub" id="feedsub"></span></h2>
+    <div class="sub" style="margin: -4px 0 8px">The cameras the vision service does not use, searched for tags by its
+      detector, with a zoomed second look at each corner tag. Green = found in at least 95% of the last 30 frames,
+      orange = it drops out. Label: id, role, short x long side in pixels (the short side is what limits a far,
+      foreshortened tag). Dot = the tag's first corner (printed top-left). Under each picture: each tag's hit
+      rate over the last 30 frames.</div>
+    <div class="feeds" id="feeds"></div>
+  </section>
   <div class="row3">
     <section class="panel">
       <h2>Ready to start? <span class="sub" id="readysub"></span></h2>
@@ -160,22 +172,24 @@ let S = null;
 // part header, and the stream is reopened by itself when it errors, ends, stalls for 3 s or
 // falls more than 1.5 s behind. It runs from page load whether or not telemetry says vision
 // is up, so the picture returns the moment the vision service does.
-const cam = { on: false, frameAt: 0, lag: null, offset: null, frames: 0, reconnects: 0, reason: "connecting" };
-const camUrls = [];
-function camShow(jpg, frameTimeMs) {
+// The corner-camera feeds (/feed/<i>.mjpg) use the same loop; see feeds below.
+const newStream = () => ({ on: false, frameAt: 0, lag: null, offset: null, frames: 0, reconnects: 0, reason: "connecting", urls: [] });
+const cam = newStream();
+function showJpeg(st, img, jpg, frameTimeMs) {
   const url = URL.createObjectURL(new Blob([jpg], { type: "image/jpeg" }));
-  $("video").src = url;
-  camUrls.push(url);
-  while (camUrls.length > 3) URL.revokeObjectURL(camUrls.shift());
+  img.src = url;
+  st.urls.push(url);
+  while (st.urls.length > 3) URL.revokeObjectURL(st.urls.shift());
   const now = Date.now();
-  cam.frameAt = now; cam.on = true; cam.frames++;
+  st.frameAt = now; st.on = true; st.frames++;
   if (frameTimeMs) {
     // Hub clock vs this browser's: the smallest age seen counts as "no lag" (it may creep up
     // 2 ms per frame so clock drift cannot wedge it); the excess over that is the lag.
     const age = now - frameTimeMs;
-    cam.offset = cam.offset == null ? age : Math.min(age, cam.offset + 2);
-    cam.lag = age - cam.offset;
+    st.offset = st.offset == null ? age : Math.min(age, st.offset + 2);
+    st.lag = age - st.offset;
   }
+  return url;
 }
 function indexOfSeq(buf, seq, from) {
   outer: for (let i = from; i <= buf.length - seq.length; i++) {
@@ -185,7 +199,7 @@ function indexOfSeq(buf, seq, from) {
   return -1;
 }
 const HDR_END = new Uint8Array([13, 10, 13, 10]);
-async function camLoop() {
+async function mjpegLoop(path, cam, show) {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const td = new TextDecoder();
   while (true) {
@@ -196,7 +210,7 @@ async function camLoop() {
       else if (cam.lag != null && cam.lag > 1500) { cam.reason = `picture ${(cam.lag / 1000).toFixed(1)} s behind`; ctrl.abort(); }
     }, 500);
     try {
-      const resp = await fetch("/video.mjpg?" + Date.now(), { cache: "no-store", signal: ctrl.signal });
+      const resp = await fetch(path + "?" + Date.now(), { cache: "no-store", signal: ctrl.signal });
       if (!resp.ok || !resp.body) throw new Error("HTTP " + resp.status);
       const reader = resp.body.getReader();
       let buf = new Uint8Array(0);
@@ -215,10 +229,10 @@ async function camLoop() {
           const ft = +(head.match(/X-Frame-Time:\s*(\d+)/i) || [])[1];
           if (!len) { buf = buf.subarray(he + 4); continue; }      // not a frame part: skip it
           if (buf.length < he + 4 + len) break;                    // frame still arriving
-          newest = { jpg: buf.slice(he + 4, he + 4 + len), t: ft || 0 };
+          newest = { jpg: buf.slice(he + 4, he + 4 + len), t: ft || 0, head };
           buf = buf.subarray(he + 4 + len);                        // older frames in this read are dropped
         }
-        if (newest) camShow(newest.jpg, newest.t);
+        if (newest) show(newest);
         if (buf.length > 4_000_000) buf = new Uint8Array(0);
       }
       cam.reason = "stream ended";
@@ -230,7 +244,92 @@ async function camLoop() {
     await sleep(1000);
   }
 }
-camLoop();
+mjpegLoop("/video.mjpg", cam, (f) => showJpeg(cam, $("video"), f.jpg, f.t));
+
+// ---- corner cameras: the cameras the vision service does not use ---------------------------
+// tools/camera_feeds.py on the vision Orin searches every frame it sends for tags (the vision
+// service's own detector, full frame, no gating) and the hub relays each frame with its X-Tags,
+// so an outline is drawn on the very image it was found in (on the image's load, not on a timer).
+// Green = found in at least 95% of the last 30 frames, orange = it drops out; the dot is the
+// tag's first corner (printed top-left); the line under each picture is each id's hit rate.
+const feedViews = {};
+function feedView(i) {
+  if (feedViews[i]) return feedViews[i];
+  const el = document.createElement("div");
+  el.className = "feed";
+  el.innerHTML = `<div class="sub" data-k="title"></div><div class="cam"><img alt=""><canvas></canvas>
+    <div class="none">connecting…</div></div><div class="sub" data-k="rates"></div>`;
+  $("feeds").appendChild(el);
+  const fv = { st: newStream(), el, img: el.querySelector("img"), cv: el.querySelector("canvas"),
+               none: el.querySelector(".none"), tagsBySrc: new Map(), shown: null, hist: [], ms: null };
+  fv.img.onload = () => {
+    const tags = fv.tagsBySrc.get(fv.img.src);
+    if (!tags) return;
+    fv.shown = tags; fv.tagsBySrc.clear();
+    fv.hist.push(new Set(tags.d.map((d) => d[0]))); if (fv.hist.length > 30) fv.hist.shift();
+    fv.ms = tags.ms;
+    drawFeed(i);
+  };
+  mjpegLoop(`/feed/${i}.mjpg`, fv.st, (f) => {
+    let tags = { d: [] };
+    const m = f.head.match(/X-Tags:\s*(\{.*\})/i);
+    if (m) { try { tags = JSON.parse(m[1]); } catch (e) { /* keep the picture, skip its tags */ } }
+    fv.tagsBySrc.set(showJpeg(fv.st, fv.img, f.jpg, f.t), tags);
+  });
+  return (feedViews[i] = fv);
+}
+function drawFeed(i) {
+  const fv = feedViews[i], info = (S && S.feeds && S.feeds[i] && S.feeds[i].info) || {};
+  const cv = fv.cv, r = cv.getBoundingClientRect();
+  cv.width = r.width * devicePixelRatio; cv.height = r.height * devicePixelRatio;
+  const g = cv.getContext("2d");
+  g.clearRect(0, 0, cv.width, cv.height);
+  const iw = fv.img.naturalWidth, ih = fv.img.naturalHeight;
+  if (!fv.shown || !iw) return;
+  const s = Math.min(cv.width / iw, cv.height / ih);
+  const ox = (cv.width - iw * s) / 2, oy = (cv.height - ih * s) / 2;
+  const P = (x, y) => [ox + x * s, oy + y * s];
+  const roles = info.roles || {}, n = fv.hist.length;
+  g.lineWidth = 2 * devicePixelRatio;
+  g.font = `${12 * devicePixelRatio}px ui-monospace, monospace`;
+  for (const [id, , ...c] of fv.shown.d) {
+    const rate = n ? fv.hist.filter((h) => h.has(id)).length / n : 0;
+    g.strokeStyle = g.fillStyle = rate >= 0.95 ? "#3fb950" : "#d29922";
+    g.beginPath();
+    for (let k = 0; k < 4; k++) { const [a, b] = P(c[2 * k], c[2 * k + 1]); k ? g.lineTo(a, b) : g.moveTo(a, b); }
+    g.closePath(); g.stroke();
+    const [a, b] = P(c[0], c[1]);
+    const ys = [1, 3, 5, 7].map((k) => P(0, c[k])[1]), xs = [0, 2, 4, 6].map((k) => P(c[k], 0)[0]);
+    const sides = [0, 1, 2, 3].map((k) => Math.hypot(c[2 * k] - c[2 * ((k + 1) % 4)], c[2 * k + 1] - c[2 * ((k + 1) % 4) + 1]));
+    const label = `${id} ${roles[String(id)] || "tag"} ${Math.round(Math.min(...sides))}x${Math.round(Math.max(...sides))}px`;
+    const lx = Math.max(2, Math.min(Math.min(...xs), cv.width - g.measureText(label).width - 2));
+    const ly = Math.max(14 * devicePixelRatio, Math.min(...ys) - 6 * devicePixelRatio);
+    g.save(); g.lineWidth = 3 * devicePixelRatio; g.strokeStyle = "rgba(0,0,0,.85)"; g.strokeText(label, lx, ly); g.restore();
+    g.fillText(label, lx, ly);
+    g.fillStyle = "#db61a2"; g.beginPath(); g.arc(a, b, 3.5 * devicePixelRatio, 0, 2 * Math.PI); g.fill();
+  }
+}
+function renderFeeds() {
+  const feeds = (S && S.feeds) || [];
+  const up = feeds.filter((f) => f.up);
+  $("feedpanel").style.display = feeds.length ? "" : "none";
+  $("feedsub").textContent = !up.length ? "no camera served (INITIALIZE starts the feeds service on the vision Orin)"
+    : `${up.length} of ${feeds.length} served`;
+  for (const f of feeds) {
+    if (!f.up && !feedViews[f.i]) continue;
+    const fv = feedView(f.i), info = f.info || {}, st = fv.st;
+    fv.el.style.display = f.up ? "" : "none";
+    const live = st.on && Date.now() - st.frameAt < 3000;
+    fv.none.style.display = live ? "none" : "grid";
+    fv.none.textContent = st.reconnects ? `reconnecting (${st.reason})…` : "connecting…";
+    fv.el.querySelector('[data-k="title"]').textContent = `cam${info.index ?? f.i} · ${info.name || "?"} · ${info.mode || ""}`
+      + (live && st.lag != null ? (st.lag < 150 ? " · live" : ` · ${(st.lag / 1000).toFixed(1)} s behind`) : "");
+    const n = fv.hist.length, ids = [...new Set(fv.hist.flatMap((h) => [...h]))].sort((a, b) => a - b);
+    fv.el.querySelector('[data-k="rates"]').textContent = !n ? "" : "tags, last " + n + " frames: "
+      + (ids.map((id) => `${id} ${Math.round(100 * fv.hist.filter((h) => h.has(id)).length / n)}%`).join(" · ") || "none")
+      + (fv.ms != null ? ` · detect ${fv.ms.toFixed(0)} ms` : "");
+  }
+}
 
 let stopError = null;
 $("stop").onclick = async () => {
@@ -550,7 +649,7 @@ function render() {
     $("vision").innerHTML = kv.map(([k, x]) => `<span>${k}</span><span>${x ?? "–"}</span>`).join("");
   }
   $("events").innerHTML = (S.events || []).slice().reverse().map(([t, e]) => `<div>${t} ${e}</div>`).join("");
-  drawOverlay(); drawMap(); drawSpark();
+  drawOverlay(); drawMap(); drawSpark(); renderFeeds();
 }
 
 async function poll() {
@@ -562,7 +661,7 @@ async function poll() {
   }
   setTimeout(poll, 150);
 }
-window.addEventListener("resize", () => S && drawOverlay());
+window.addEventListener("resize", () => { if (S) { drawOverlay(); Object.keys(feedViews).forEach(drawFeed); } });
 poll();
 </script>
 </body>

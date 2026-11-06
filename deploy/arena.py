@@ -135,6 +135,7 @@ class Config:
         self.pose_port, self.tel_port = n.getint("pose_port"), n.getint("telemetry_port")
         self.ctl_port, self.preview_port = n.getint("control_port"), n.getint("preview_port")
         self.dash_port = n.getint("dashboard_port")
+        self.feed_ports = [int(x) for x in n.get("feed_ports", "").split(",") if x.strip()]
         self.control_addr_from_vision = n.get("control_addr_from_vision", "auto")
         self.vision_addr_from_control = n.get("vision_addr_from_control", "auto")
 
@@ -175,6 +176,15 @@ svc_stop() {
   for _ in $(seq 40); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
   kill -0 "$pid" 2>/dev/null && kill -KILL -- "-$pid" 2>/dev/null
   rm -f "$A/run/$name.pid"; echo "$name stopped"
+}
+# A hand-started `tools/camera_feeds.py serve` holds EVERY camera, the vision service's
+# too. The `feeds` service runs it with --secondary, which never touches that camera.
+free_cameras() {
+  local p
+  for p in $(pgrep -f "^[^ ]*python[^ ]* (-u )?[^ ]*camera_feeds\.py serve"); do
+    tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | grep -q -- "--secondary" && continue
+    kill -TERM "$p" 2>/dev/null && echo "stopped a hand-started camera_feeds.py (pid $p): it held the cameras" && sleep 1
+  done
 }
 '''
 
@@ -390,7 +400,7 @@ def cmd_status(args, cfg: Config) -> None:
     probe = r'''
 echo "host=$(hostname)"
 echo "git=$(git rev-parse --short HEAD 2>/dev/null) $(git rev-parse --abbrev-ref HEAD 2>/dev/null) $( [ -n "$(git status --porcelain 2>/dev/null)" ] && echo dirty)"
-for n in vision controller hub; do if pid=$(svc_pid $n); then echo "svc_$n=running"; else echo "svc_$n=stopped"; fi; done
+for n in vision feeds controller hub; do if pid=$(svc_pid $n); then echo "svc_$n=running"; else echo "svc_$n=stopped"; fi; done
 c=/sys/devices/system/cpu/cpu0/cpufreq
 [ -r $c/scaling_cur_freq ] && echo "clock=$(( $(cat $c/scaling_cur_freq)/1000 ))/$(( $(cat $c/cpuinfo_max_freq)/1000 )) MHz min=$(( $(cat $c/scaling_min_freq)/1000 ))"
 t=$(cat /sys/class/thermal/thermal_zone*/temp 2>/dev/null | sort -n | tail -1); [ -n "$t" ] && echo "temp=$((t/1000)) C"
@@ -446,7 +456,7 @@ def cmd_sync(args, cfg: Config) -> None:
         else:
             die(f"{branch} @ {head} is not on origin yet. Push it (git push), or `arena sync --push`.")
     script = f'''
-running=""; for n in vision controller hub; do svc_pid $n >/dev/null && running="$running $n"; done
+running=""; for n in vision feeds controller hub; do svc_pid $n >/dev/null && running="$running $n"; done
 # The Orins never carry commits of their own, so mirror origin exactly (this also
 # follows a rebased / force-pushed branch). Tracked edits made on the Orin make
 # the checkout refuse rather than being thrown away; untracked and ignored files
@@ -532,6 +542,7 @@ def cmd_scan(args, cfg: Config) -> None:
     step(f"scanning the arena from {v.target}")
     p = run_on(v, f'''
 if pid=$(svc_pid vision); then echo "(stopping the vision service: the camera can only be opened once)"; svc_stop vision >/dev/null; fi
+free_cameras
 cd portable_orin_perception && {v.python} -u scan_arena.py {extra}
 ''', lib=True, tty=not v.local)
     if not v.local:
@@ -682,6 +693,7 @@ def cmd_up(args, cfg: Config) -> None:
     ctrl_addr = _control_addr_from_vision(cfg)
     vis_addr = "127.0.0.1" if cfg.single else (
         v.host if cfg.vision_addr_from_control == "auto" else cfg.vision_addr_from_control)
+    feeds = ",".join(f"http://{vis_addr}:{p}" for p in cfg.feed_ports)
 
     if getattr(args, "restart", False):
         # svc_start leaves a running service alone, so a new model or car count needs this
@@ -692,7 +704,7 @@ def cmd_up(args, cfg: Config) -> None:
     step(f"control: {c.target} -- hub + controller ({model}: {n} pursuer(s), cars {esp}) DISARMED")
     run_on(c, f'''
 svc_start hub . {c.tools_python} -u deploy/hub.py --port {cfg.dash_port} --telemetry-port {cfg.tel_port} \
-    --control-port {cfg.ctl_port} --preview http://{vis_addr}:{cfg.preview_port}
+    --control-port {cfg.ctl_port} --preview http://{vis_addr}:{cfg.preview_port}{f" --feeds {feeds}" if feeds else ""}
 svc_start controller portable_n1_controller {c.python} -u run_controller.py --model {shlex.quote(model)} \
     --source udp --pose-port {cfg.pose_port} --esp {shlex.quote(esp)} \
     --telemetry 127.0.0.1:{cfg.tel_port} --control-port {cfg.ctl_port} --start-disarmed
@@ -702,11 +714,15 @@ svc_start controller portable_n1_controller {c.python} -u run_controller.py --mo
     # any pose can flow. A controller that is still starting is disarmed anyway.
     _ctl(cfg, "disarm")
     step(f"vision: {v.target} -- camera -> poses of {n} pursuer(s) + evader -> {ctrl_addr}:{cfg.pose_port}")
+    # The other cameras go to the dashboard's tag check (the `feeds` service), started after
+    # the vision service, which they never touch.
     run_on(v, f'''
+svc_pid vision >/dev/null || free_cameras
 svc_start vision portable_orin_perception {v.python} -u run_vision.py \
     --pose-target {ctrl_addr}:{cfg.pose_port} --telemetry {ctrl_addr}:{cfg.tel_port} \
     --preview-port {cfg.preview_port} --pursuers {n}
-''', lib=True, check=True, timeout=30)
+''' + (f"svc_start feeds portable_orin_perception {v.python} -u tools/camera_feeds.py serve --secondary "
+       f"--port {min(cfg.feed_ports)}\n" if cfg.feed_ports else ""), lib=True, check=True, timeout=30)
 
     step("waiting for the pipeline to come up")
     url = hub_url(cfg)
@@ -782,8 +798,8 @@ def cmd_stop(args, cfg: Config) -> None:
     cfg.require_topology()
     _ctl(cfg, "disarm")
     for r in ([cfg.control] if cfg.single else [cfg.control, cfg.vision]):
-        names = ["controller", "hub", "vision"] if cfg.single else (
-            ["controller", "hub"] if r is cfg.control else ["vision"])
+        names = ["controller", "hub", "vision", "feeds"] if cfg.single else (
+            ["controller", "hub"] if r is cfg.control else ["vision", "feeds"])
         p = run_on(r, "\n".join(f"svc_stop {n}" for n in names), lib=True, capture=True, timeout=30)
         for line in p.stdout.strip().splitlines():
             ok(f"{r.name}: {line}")
@@ -792,7 +808,7 @@ def cmd_stop(args, cfg: Config) -> None:
 
 def cmd_logs(args, cfg: Config) -> None:
     cfg.require_topology()
-    role = cfg.vision if args.name == "vision" else cfg.control
+    role = cfg.vision if args.name in ("vision", "feeds") else cfg.control
     run_on(role, f"tail -n {args.lines} {'-f ' if args.follow else ''}~/.arena/logs/{args.name}.log",
            tty=args.follow)
 
@@ -1030,7 +1046,7 @@ def main(argv=None) -> None:
     p.add_argument("--interval", type=float, default=0.25)
     p.set_defaults(fn=cmd_monitor)
     p = sub.add_parser("logs", help="show a service's log")
-    p.add_argument("name", choices=["vision", "controller", "hub"])
+    p.add_argument("name", choices=["vision", "feeds", "controller", "hub"])
     p.add_argument("-f", "--follow", action="store_true")
     p.add_argument("-n", "--lines", type=int, default=60)
     p.set_defaults(fn=cmd_logs)

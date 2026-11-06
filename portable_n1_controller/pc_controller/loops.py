@@ -33,7 +33,9 @@ from controller_runtime.latency import LatencyBudget, LatencyTracker
 from controller_runtime.pose_types import VehiclePose
 
 # manifest "runtime" -> the vendored module that implements it
-RUNTIMES = {"hive_commander_v1": "pc_controller.runtimes.hive_commander_v1"}
+RUNTIMES = {"hive_commander_v1": "pc_controller.runtimes.hive_commander_v1",
+            # one pursuer, rc16 toy car, 8 ft arena, two-corner-camera poses (AI Training rc16/deploy/n1_runtime.py)
+            "rc16_n1_v1": "pc_controller.runtimes.rc16_n1_v1"}
 
 
 def read_manifest(model_dir: str | Path) -> dict:

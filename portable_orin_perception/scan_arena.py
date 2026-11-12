@@ -216,31 +216,26 @@ def main(argv=None) -> int:
             + ("" if level == OK else " (aim for 80-170 and <3% clipped)"))
     if args.tune_exposure and not args.synthetic:
         # Motion blur is what loses a moving car's tag: at 1.4 m/s a 7 cm tag that is 18 px
-        # on screen smears 6 px in a 16 ms exposure (detection rate ~0%, measured on
-        # synthetic frames) and 1.5 px in 4 ms (100%). Brightness is bought back with
-        # gain, which only adds noise the adaptive threshold shrugs off. So: the shortest
-        # exposure that is bright enough, at the lowest gain that allows it, aiming for
-        # <= TARGET_EXPOSURE.
+        # on screen smears 6 px in a 16 ms exposure (~0% detections on synthetic frames)
+        # and 1.5 px in 4 ms (100%). But a short exposure also starves the small,
+        # foreshortened tags at the far side of an oblique camera: on the real 8 ft arena
+        # (2026-11-11) the far corner tag went from 83% seen at 16 ms to 30% at 12 ms and
+        # 10% at 8 ms, and raising gain to compensate made it WORSE (noise: 12% at 3 ms /
+        # gain 128) while slowing detection. So: the shortest exposure that keeps the mean
+        # grey level at MIN_MEAN, at the camera's own gain; gain goes up only when even the
+        # longest exposure is too dim. More light is the real fix, and the report says so.
+        # The corner fit below uses the frames grabbed BEFORE this (auto exposure, every
+        # corner at its most visible); the saved exposure is for driving.
         from vision import camera_controls
-        TARGET_EXPOSURE, MIN_MEAN = 60, 90                     # 6 ms; mean grey level
-        exposures = (30, 40, 50, 60, 80, 120, 160, 250, 330)   # 3 ms .. 33 ms
+        TARGET_EXPOSURE, MIN_MEAN = 80, 110                    # 8 ms (~3 px smear); mean grey
+        exposures = (30, 40, 50, 60, 80, 100, 120, 160, 200, 250, 330)   # 3 ms .. 33 ms
         g = camera_controls.gain_range(cam.device)
-        gains = [None]
-        if g is not None:
-            cur, lo, hi = g
-            gains = [cur]
-            step = max(cur, 8)
-            while gains[-1] < hi:
-                gains.append(min(hi, gains[-1] + step))
-                step *= 2
-        best = None                                             # (exposure, gain, mean)
-        supported = True
-        for gain in gains:
+        gains = [None] if g is None else [g[0], min(g[2], max(g[0] * 2, 16)), min(g[2], max(g[0] * 4, 32))]
+        best, supported = None, True                            # (exposure, gain, mean)
+        for gi, gain in enumerate(gains):
             if gain is not None and not camera_controls.set_gain(cam.device, gain):
                 break
             for exp in exposures:
-                if best is not None and exp >= best[0]:
-                    break                                       # this gain cannot beat it
                 if not camera_controls.set_exposure(cam.device, exp):
                     rep.add(WARN, "exposure", "camera has no manual exposure control")
                     supported = False
@@ -254,26 +249,24 @@ def main(argv=None) -> int:
                 if m >= MIN_MEAN:
                     best = (exp, gain, m)
                     break
-            if not supported or (best is not None and best[0] <= TARGET_EXPOSURE):
-                break
+            if not supported or best is not None:
+                break                                           # gain only rescues a dim room
         if best is not None:
             exp, gain, m = best
-            values = {"exposure": exp} if gain is None else {"exposure": exp, "gain": gain}
-            camera_controls.set_exposure(cam.device, exp)
-            if gain is not None:
-                camera_controls.set_gain(cam.device, gain)
+            raised = gain is not None and gain != gains[0]
+            values = {"exposure": exp, "gain": gain} if raised else {"exposure": exp}
             path = write_local_override(cfg_dir / "camera.yaml", **values)
             ppm = 0.9 * min(cam.size) / (2.0 * half[0])            # ~px per metre, overhead camera
             blur_px = 1.4 * exp / 10000.0 * ppm
             rep.add(OK if exp <= TARGET_EXPOSURE else WARN, "exposure",
-                    f"{exp / 10:.0f} ms at gain {gain if gain is not None else 'auto'} (mean {m:.0f}); "
+                    f"{exp / 10:.0f} ms" + (f" at gain {gain}" if raised else "") + f" (mean {m:.0f}); "
                     f"a car at 1.4 m/s smears ~{blur_px:.1f} px; saved to {path.name}"
-                    + ("" if exp <= TARGET_EXPOSURE else ". Add light for a shorter exposure"))
+                    + ("" if exp <= TARGET_EXPOSURE else
+                       ". That smear loses small tags on a moving car: add light over the arena"))
         elif supported:
             if g is not None:
                 camera_controls.set_gain(cam.device, g[0])
-            rep.add(WARN, "exposure", "even 33 ms at full gain is dim: add light, or leave exposure on auto")
-        frames = grab(source, max(args.frames, 20))
+            rep.add(WARN, "exposure", "even 33 ms at 4x gain is dim: add light, or leave exposure on auto")
     source.stop()
 
     # ------------------------------------------------------------------ 3. tags

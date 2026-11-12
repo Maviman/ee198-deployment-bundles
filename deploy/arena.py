@@ -755,7 +755,7 @@ svc_start vision portable_orin_perception {v.python} -u run_vision.py \
     --pose-target {ctrl_addr}:{cfg.pose_port} --telemetry {ctrl_addr}:{cfg.tel_port} \
     --preview-port {cfg.preview_port} --pursuers {n}
 ''' + (f"svc_start feeds portable_orin_perception {v.python} -u tools/camera_feeds.py serve --secondary "
-       f"--port {min(cfg.feed_ports)}\n" if cfg.feed_ports else ""), lib=True, check=True, timeout=30)
+       f"--port {min(cfg.feed_ports)} --pursuers {n}\n" if cfg.feed_ports else ""), lib=True, check=True, timeout=30)
 
     step("waiting for the pipeline to come up")
     url = hub_url(cfg)

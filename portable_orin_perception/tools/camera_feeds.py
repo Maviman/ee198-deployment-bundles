@@ -309,7 +309,8 @@ def serve(args) -> int:
         w, rest = args.mode.split("x")
         h, fps = rest.split("@")
         base = base.with_overrides(width=int(w), height=int(h), fps=int(fps))
-    marker_map = load_marker_map(args.marker_map or ROOT / "config" / "marker_map.yaml")
+    marker_map = load_marker_map(args.marker_map or ROOT / "config" / "marker_map.yaml").with_pursuers(
+        getattr(args, "pursuers", None))
     roles = {str(k): v for k, v in tag_roles(marker_map).items()}
     floor_px = family_spec(marker_map.dictionary).min_detect_px()
     chosen = select_cameras(find_cameras(), devices=args.device,
@@ -515,7 +516,8 @@ def view(args) -> int:
     sys.path.insert(0, str(ROOT / "ros2_ws" / "src" / "hive_perception"))
     from hive_perception.core.frame_builder import load_marker_map
 
-    marker_map = load_marker_map(args.marker_map or ROOT / "config" / "marker_map.yaml")
+    marker_map = load_marker_map(args.marker_map or ROOT / "config" / "marker_map.yaml").with_pursuers(
+        getattr(args, "pursuers", None))
     streams = []
     for spec in args.streams:
         name, _, url = spec.partition("=") if "=" in spec.split("://")[0] else ("", "", spec)
@@ -568,6 +570,9 @@ def main(argv=None) -> int:
     s.add_argument("--secondary", action="store_true",
                    help="skip the vision service's camera (config/camera.yaml device); `arena up` uses this")
     s.add_argument("--marker-map", default=None, help="default: config/marker_map.yaml")
+    s.add_argument("--pursuers", type=int, default=None,
+                   help="decode only the first N pursuer tags of marker_map.yaml (what the vision "
+                        "service tracks), so a poor read can never be labelled with a car not in play")
     s.add_argument("--port", type=int, default=8091, help="camera i of the by-id list is on port + i")
     s.add_argument("--fps", type=float, default=15.0,
                    help="max frames per second sent (and searched for tags) while someone watches")
@@ -576,6 +581,9 @@ def main(argv=None) -> int:
     v.add_argument("streams", nargs="+", help="URL or name=URL")
     v.add_argument("--window", type=int, nargs=2, default=(800, 450), metavar=("W", "H"))
     v.add_argument("--marker-map", default=None, help="default: config/marker_map.yaml")
+    v.add_argument("--pursuers", type=int, default=None,
+                   help="decode only the first N pursuer tags of marker_map.yaml (what the vision "
+                        "service tracks), so a poor read can never be labelled with a car not in play")
     v.add_argument("--no-tags", action="store_true", help="start with the tag overlay off (t toggles)")
     args = ap.parse_args(argv)
     return serve(args) if args.cmd == "serve" else view(args)

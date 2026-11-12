@@ -281,7 +281,7 @@ def test_calibrate_scans_then_brings_the_camera_service_back(rig, tmp_path):
     assert r.post("/api/scan") == (200, {"started": True})
     job = wait_job(r)
     assert job["kind"] == "scan" and job["ok"] is True
-    assert job["lines"] == ["arena scan", "--- arena up ---", "arena up"]
+    assert job["lines"] == ["arena scan", "--- arena up ---", "arena up"], "CALIBRATE = scan (with exposure tuning), then up"
 
 
 def test_a_failed_calibration_says_so_but_brings_the_camera_back_to_fix_tags_by(rig, tmp_path):
@@ -302,7 +302,7 @@ def test_the_scans_verdict_stays_visible_after_arena_up_scrolls_the_log(rig, tmp
     assert r.post("/api/scan")[0] == 200
     job = wait_job(r)
     assert not any("[FAIL]" in l for l in job["lines"]), "the log tail is all `arena up` by now"
-    assert job["summary"] == ["arena scan: FAILED (exit 1)",
+    assert job["summary"] == ["arena scan --tune-exposure: FAILED (exit 1)",
                               "  [WARN] tag 11 (corner): seen 47% of frames, 19.2 px",
                               "  [FAIL] calibration: need 4 corner tags",
                               "arena up: ok"]

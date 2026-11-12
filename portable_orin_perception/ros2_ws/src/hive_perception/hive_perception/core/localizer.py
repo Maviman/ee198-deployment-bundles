@@ -139,6 +139,7 @@ class Localizer:
                  arena_half_extent: tuple[float, float] | None = None,
                  roi_tracking: bool = True, gating: bool = True, tuned: bool = True,
                  subpixel: bool = True, full_frame_every_s: float | None = 1.0,
+                 roi_upscale_below_px: float = 24.0,
                  track_timeout_s: float = 0.3, max_speed_mps: float = 2.0,
                  jump_margin_m: float = 0.10, jump_window_s: float = 0.5,
                  bounds_margin_m: float = 0.15) -> None:
@@ -154,6 +155,12 @@ class Localizer:
         self.arena_half_extent = arena_half_extent
         self.gating = bool(gating) and self.homography is not None
         self.roi_tracking = bool(roi_tracking)
+        # Tracking windows around a tag smaller than this are detected at 2x (bicubic).
+        # Measured on synthetic 720p frames: an 18 px tag with 5 px of motion blur is found
+        # in 42% of frames at 1x and 72% at 2x, for ~0.5 ms more per window; sharp tags and
+        # tags over ~24 px gain nothing, so those windows stay at 1x. (The full-frame
+        # detector is not upscaled: 4x the pixels for the same gain is a 20+ ms frame.)
+        self.roi_upscale_below_px = float(roi_upscale_below_px)
         self.full_frame_every_s = None if full_frame_every_s is None else float(full_frame_every_s)
         self.track_timeout_s = float(track_timeout_s)
         self.max_speed_mps = float(max_speed_mps)
@@ -192,7 +199,7 @@ class Localizer:
                       "rejected": {"bounds": 0, "jump": 0, "size": 0, "dup": 0}}
 
     # ------------------------------------------------------------------ detect
-    def _run(self, detector, gray, offset=(0, 0)) -> list[Detection]:
+    def _run(self, detector, gray, offset=(0, 0), scale: float = 1.0) -> list[Detection]:
         corners, ids, _rejected = detector.detectMarkers(gray)
         if ids is None:
             return []
@@ -201,12 +208,16 @@ class Localizer:
         for marker_corners, row in zip(corners, ids.flatten()):
             marker_id = self.tag_set.to_real_id(int(row))   # raises on a config mismatch
             c = marker_math.as_corner_array(marker_corners).copy()
+            if scale != 1.0:
+                # Pixel centres: source pixel u covers [u, u+1), so an upscaled image's
+                # pixel v maps back to (v + 0.5) / scale - 0.5, not v / scale (0.25 px off at 2x).
+                c = (c + 0.5) / scale - 0.5
             c[:, 0] += ox
             c[:, 1] += oy
             out.append(Detection(marker_id, c, side_px_of(c)))
         return out
 
-    def _roi_detector(self, window_px: int):
+    def _roi_detector(self, window_px: int, scale: float = 1.0):
         """Detector for a tracking window of (bucketed) side ``window_px``.
 
         OpenCV's perimeter limits are RELATIVE to the image, so a detector
@@ -215,16 +226,17 @@ class Localizer:
         quad (measured: a 100 px window cost MORE than a 200 px one). Each
         window size therefore gets limits that are the same in absolute pixels,
         cached per 32 px bucket."""
-        det = self._roi_detectors.get(window_px)
+        key = (window_px, scale)
+        det = self._roi_detectors.get(key)
         if det is None:
             import cv2
 
-            side = float(np.median([tr.side_px for tr in self._tracks.values()]))
+            side = float(np.median([tr.side_px for tr in self._tracks.values()])) * scale
             p = tuned_parameters(vehicle_px_min=side, largest_px_max=side,
-                                 image_max_dim=window_px, total_modules=self._modules,
+                                 image_max_dim=int(window_px * scale), total_modules=self._modules,
                                  subpixel=self._subpixel)
             det = cv2.aruco.ArucoDetector(self._dictionary, p)
-            self._roi_detectors[window_px] = det
+            self._roi_detectors[key] = det
         return det
 
     def _roi_pass(self, gray, t: float) -> list[Detection]:
@@ -242,7 +254,13 @@ class Localizer:
             x1, y1 = min(w, int(pred[0]) + half), min(h, int(pred[1]) + half)
             if x1 - x0 < 16 or y1 - y0 < 16:
                 continue
-            out.extend(self._run(self._roi_detector(bucket), gray[y0:y1, x0:x1], (x0, y0)))
+            win = gray[y0:y1, x0:x1]
+            scale = 2.0 if tr.side_px < self.roi_upscale_below_px else 1.0
+            if scale != 1.0:
+                import cv2
+
+                win = cv2.resize(win, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+            out.extend(self._run(self._roi_detector(bucket, scale), win, (x0, y0), scale))
         return out
 
     def _tracks_live(self, t: float) -> bool:

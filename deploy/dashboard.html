@@ -99,7 +99,7 @@
     <div class="big" id="tick">&ndash;</div>
   </div>
   <button class="act" id="init" title="Bring the whole system up (arena up): starts whatever is not running; the cars stay DISARMED">INITIALIZE</button>
-  <button class="act" id="scan" title="Re-fit the arena frame from the corner tags (arena scan), then restart the camera service">CALIBRATE</button>
+  <button class="act" id="scan" title="Lock the shortest exposure the light allows (no motion blur on a moving car), re-fit the arena frame from the corner tags (arena scan --tune-exposure), then restart the camera service">CALIBRATE</button>
   <button class="act go" id="start" title="ARM the car: the policy drives. Only from a browser on the control Orin, and only when every check is green">START</button>
   <button class="stop" id="stop" title="E-stop every car now (keeps services running; re-arm with `arena go`)">STOP</button>
 </header>
@@ -567,8 +567,8 @@ function render() {
   $("scan").title = !canCtl ? "CALIBRATE only works from a browser on the control Orin itself"
     : !S.can_init ? "this hub was started without --arena-cli: run ./arena scan in a terminal"
     : armedNow ? "the car is ARMED: press STOP first"
-    : "Re-fit the arena frame from the four corner tags (arena scan; the car is disarmed and the camera "
-      + "service paused), then restart the camera service";
+    : "Lock the shortest exposure the light allows, then re-fit the arena frame from the four corner tags "
+      + "(arena scan --tune-exposure; the car is disarmed and the camera service paused), then restart the camera service";
   $("checks").innerHTML = (rd.checks || []).map((x) =>
     `<div class="${x.ok ? "c-ok" : "c-bad"}">${x.name}${x.detail ? ` <span class="d">— ${x.detail}</span>` : ""}</div>`).join("")
     || `<div class="sub">no data</div>`;

@@ -167,3 +167,51 @@ def test_vendored_parser_is_byte_identical_to_the_owner():
     if not owner.exists():
         pytest.skip("controller bundle not alongside")
     assert owner.read_bytes() == (ROOT / "vendored" / "pc_controller" / "pose_stream.py").read_bytes()
+
+
+def test_small_tag_windows_are_upscaled_and_map_back_to_the_same_pixels():
+    # The 8 ft arena at 720p puts a 7 cm tag at ~18 px on the far side. Its tracking
+    # window is detected at 2x; the corners must come back in full-image pixels.
+    mm = MarkerMap("DICT_4X4_50", 0, [1], [10, 11, 12, 13])
+    half = (1.2192, 1.2192)
+    H = overhead_homography(SIZE, half, fill=18.0 / 0.07 * 2 * half[1] / SIZE[1])
+    r = SceneRenderer(mm, H, SIZE, half, seed=3, blur_px=1)
+    up = Localizer(mm, H, image_size=SIZE, arena_half_extent=half, full_frame_every_s=None)
+    flat = Localizer(mm, H, image_size=SIZE, arena_half_extent=half, full_frame_every_s=None,
+                     roi_upscale_below_px=0.0)
+    assert up.vehicle_px_range[1] < 24.0
+    pose = {1: (-0.6, 0.4, 0.3), 0: (0.5, -0.5, 2.0)}
+    for k in range(3):
+        a, b = up.process(r.render(pose), k / 30), flat.process(r.render(pose), k / 30)
+    assert a.mode == b.mode == "roi"
+    ca = next(d.corners for d in a.detections if d.marker_id == 1)
+    cb = next(d.corners for d in b.detections if d.marker_id == 1)
+    assert np.abs(ca - cb).max() < 0.75, "upscaled corners must land on the same image pixels"
+    assert math.hypot(a.found[1][0] + 0.6, a.found[1][1] - 0.4) < 0.01
+
+
+def test_upscaled_windows_keep_more_blurred_small_tags():
+    # 5 px of motion blur on an 18 px tag: at 1x the window loses most frames and the
+    # localizer falls back to a full-frame search; at 2x it keeps the track far more often.
+    mm = MarkerMap("DICT_4X4_50", 0, [1], [10, 11, 12, 13])
+    half = (1.2192, 1.2192)
+    H = overhead_homography(SIZE, half, fill=18.0 / 0.07 * 2 * half[1] / SIZE[1])
+    sharp = SceneRenderer(mm, H, SIZE, half, seed=5, blur_px=1)
+    blurred = SceneRenderer(mm, H, SIZE, half, seed=5, blur_px=5)
+
+    def roi_hits(**kw):
+        loc = Localizer(mm, H, image_size=SIZE, arena_half_extent=half, full_frame_every_s=None, **kw)
+        rng = np.random.default_rng(7)
+        hits = 0
+        for k in range(24):
+            pose = {1: (float(rng.uniform(-1, 1)), float(rng.uniform(-1, 1)), float(rng.uniform(-3, 3))),
+                    0: (0.0, 0.0, 0.0)}
+            loc.reset_tracks()
+            loc.process(sharp.render(pose), k)           # establish the track on a sharp frame
+            res = loc.process(blurred.render(pose), k + 1 / 30)
+            hits += res.mode == "roi" and 1 in res.found
+        return hits
+
+    flat, up = roi_hits(roi_upscale_below_px=0.0), roi_hits()
+    assert up > flat, (up, flat)
+    assert up >= 12, (up, flat)

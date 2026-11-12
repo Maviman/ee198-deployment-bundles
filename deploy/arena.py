@@ -683,6 +683,38 @@ def _control_addr_from_vision(cfg: Config) -> str:
     return addr
 
 
+# `arena tune` without the password prompts: pin the clocks and switch WiFi power-save
+# off only where they are not already, with sudo -n (no prompt; the Orins have passwordless
+# sudo for these). Both reset at every reboot, and a vision Orin left at 0.9 GHz runs
+# detection ~2x slower than it has to, so `arena up` makes sure instead of trusting the operator.
+TUNE_QUIET = r'''
+c=/sys/devices/system/cpu/cpu0/cpufreq
+if [ -r $c/scaling_min_freq ]; then
+  if [ "$(cat $c/scaling_min_freq)" -lt $(( $(cat $c/cpuinfo_max_freq) * 97 / 100 )) ]; then
+    if sudo -n jetson_clocks >/dev/null 2>&1; then echo "clocks=pinned now ($(( $(cat $c/scaling_cur_freq)/1000 )) MHz)"
+    else echo "clocks=NOT pinned (sudo wants a password: run arena tune)"; fi
+  else echo "clocks=pinned"; fi
+fi
+w=$(iw dev 2>/dev/null | awk '/Interface/{print $2; exit}')
+if [ -n "$w" ] && [ "$(iw dev $w get power_save 2>/dev/null | awk '{print $3}')" = "on" ]; then
+  if sudo -n iw dev "$w" set power_save off 2>/dev/null; then echo "wifi=power-save off now"
+  else echo "wifi=power-save ON (sudo wants a password: run arena tune)"; fi
+fi
+'''
+
+
+def ensure_tuned(cfg: Config) -> None:
+    for r in cfg.roles():
+        try:
+            p = run_on(r, TUNE_QUIET, capture=True, timeout=20)
+        except SystemExit:
+            continue
+        for line in p.stdout.splitlines():
+            if "=" in line:
+                k, v_ = line.split("=", 1)
+                (warn if "NOT" in v_ or "ON" in v_ else ok)(f"{r.name}: {k} {v_}")
+
+
 def cmd_up(args, cfg: Config) -> None:
     cfg.require_topology()
     head, _branch, _dirty = local_head()
@@ -690,6 +722,7 @@ def cmd_up(args, cfg: Config) -> None:
     model = args.model or cfg.model
     esp = args.esp or cfg.esp
     n = resolve_fleet(cfg, model, args.pursuers)
+    ensure_tuned(cfg)
     ctrl_addr = _control_addr_from_vision(cfg)
     vis_addr = "127.0.0.1" if cfg.single else (
         v.host if cfg.vision_addr_from_control == "auto" else cfg.vision_addr_from_control)

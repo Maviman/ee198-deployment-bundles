@@ -215,26 +215,64 @@ def main(argv=None) -> int:
     rep.add(level, "brightness", f"mean {mean:.0f}/255, {clip:.1f}% clipped"
             + ("" if level == OK else " (aim for 80-170 and <3% clipped)"))
     if args.tune_exposure and not args.synthetic:
+        # Motion blur is what loses a moving car's tag: at 1.4 m/s a 7 cm tag that is 18 px
+        # on screen smears 6 px in a 16 ms exposure (detection rate ~0%, measured on
+        # synthetic frames) and 1.5 px in 4 ms (100%). Brightness is bought back with
+        # gain, which only adds noise the adaptive threshold shrugs off. So: the shortest
+        # exposure that is bright enough, at the lowest gain that allows it, aiming for
+        # <= TARGET_EXPOSURE.
         from vision import camera_controls
-        chosen = None
-        for exp in (30, 50, 80, 120, 160, 250, 330):          # 3 ms .. 33 ms
-            if not camera_controls.set_exposure(cam.device, exp):
-                rep.add(WARN, "exposure", "camera has no manual exposure control")
+        TARGET_EXPOSURE, MIN_MEAN = 60, 90                     # 6 ms; mean grey level
+        exposures = (30, 40, 50, 60, 80, 120, 160, 250, 330)   # 3 ms .. 33 ms
+        g = camera_controls.gain_range(cam.device)
+        gains = [None]
+        if g is not None:
+            cur, lo, hi = g
+            gains = [cur]
+            step = max(cur, 8)
+            while gains[-1] < hi:
+                gains.append(min(hi, gains[-1] + step))
+                step *= 2
+        best = None                                             # (exposure, gain, mean)
+        supported = True
+        for gain in gains:
+            if gain is not None and not camera_controls.set_gain(cam.device, gain):
                 break
-            time.sleep(0.3)
-            sample = grab(source, 4)
-            if not sample:
-                continue
-            m = float(np.mean([s[0].mean() for s in sample]))
-            print(f"        exposure {exp / 10:.0f} ms -> mean {m:.0f}")
-            if m >= 90:
-                chosen = exp
+            for exp in exposures:
+                if best is not None and exp >= best[0]:
+                    break                                       # this gain cannot beat it
+                if not camera_controls.set_exposure(cam.device, exp):
+                    rep.add(WARN, "exposure", "camera has no manual exposure control")
+                    supported = False
+                    break
+                time.sleep(0.3)
+                sample = grab(source, 4)
+                if not sample:
+                    continue
+                m = float(np.mean([s[0].mean() for s in sample]))
+                print(f"        gain {gain if gain is not None else '-'}: exposure {exp / 10:.0f} ms -> mean {m:.0f}")
+                if m >= MIN_MEAN:
+                    best = (exp, gain, m)
+                    break
+            if not supported or (best is not None and best[0] <= TARGET_EXPOSURE):
                 break
-        if chosen is not None:
-            path = write_local_override(cfg_dir / "camera.yaml", exposure=chosen)
-            rep.add(OK, "exposure", f"{chosen / 10:.0f} ms is bright enough; saved to {path.name}")
-        else:
-            rep.add(WARN, "exposure", "even 33 ms is dim: add light, or leave exposure on auto")
+        if best is not None:
+            exp, gain, m = best
+            values = {"exposure": exp} if gain is None else {"exposure": exp, "gain": gain}
+            camera_controls.set_exposure(cam.device, exp)
+            if gain is not None:
+                camera_controls.set_gain(cam.device, gain)
+            path = write_local_override(cfg_dir / "camera.yaml", **values)
+            ppm = 0.9 * min(cam.size) / (2.0 * half[0])            # ~px per metre, overhead camera
+            blur_px = 1.4 * exp / 10000.0 * ppm
+            rep.add(OK if exp <= TARGET_EXPOSURE else WARN, "exposure",
+                    f"{exp / 10:.0f} ms at gain {gain if gain is not None else 'auto'} (mean {m:.0f}); "
+                    f"a car at 1.4 m/s smears ~{blur_px:.1f} px; saved to {path.name}"
+                    + ("" if exp <= TARGET_EXPOSURE else ". Add light for a shorter exposure"))
+        elif supported:
+            if g is not None:
+                camera_controls.set_gain(cam.device, g[0])
+            rep.add(WARN, "exposure", "even 33 ms at full gain is dim: add light, or leave exposure on auto")
         frames = grab(source, max(args.frames, 20))
     source.stop()
 

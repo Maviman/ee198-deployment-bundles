@@ -181,8 +181,10 @@ class VisionService:
     def run(self) -> int:
         import cv2
 
-        if self.args.cv_threads:
-            cv2.setNumThreads(int(self.args.cv_threads))
+        # Detection stops getting faster past 2 threads (720p, measured on the Orin:
+        # 9.7 ms at 1, 6.1 at 2, 6.2 at 6), and OpenCV's default of one per core makes the
+        # hot loop, the audit thread and the feeds service fight over the same six cores.
+        cv2.setNumThreads(int(self.args.cv_threads) if self.args.cv_threads else 3)
         for sig in (signal.SIGINT, signal.SIGTERM):
             try:
                 signal.signal(sig, lambda *_: self.stop_event.set())

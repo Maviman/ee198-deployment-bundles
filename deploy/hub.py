@@ -39,7 +39,9 @@ never slow a pose frame or a command.
     POST /api/fleet        APPLY in the fleet menu, same rules as /api/init: body
                            {"pursuers": N, "model": "models/<name>"} runs `arena fleet
                            --pursuers N --model M`, then `arena up --restart`.
-    POST /api/scan         CALIBRATE, same rules as /api/init: `<--arena-cli> scan` (it
+    POST /api/scan         CALIBRATE, same rules as /api/init: `<--arena-cli> scan
+                           --tune-exposure` (the shortest exposure the light allows,
+                           so a moving car's tag does not smear; then the corner fit) (it
                            disarms first), then `arena up` to restore the camera service.
     GET  /api/scan.png     the annotated snapshot of the latest scan.
 """
@@ -504,7 +506,7 @@ class Hub:
     # kind -> (button, [(arena subcommand, time limit s, run even if an earlier step failed)]);
     # "{args}" takes the arguments the request supplied (set_fleet)
     JOBS = {"init": ("INITIALIZE", [("up", 150, False)]),
-            "scan": ("CALIBRATE", [("scan", 150, False), ("up", 150, True)]),
+            "scan": ("CALIBRATE", [("scan --tune-exposure", 200, False), ("up", 150, True)]),
             "fleet": ("APPLY", [("fleet {args}", 30, False), ("up --restart", 150, False)])}
 
     def _start_job(self, kind: str, extra: list[str] | None = None) -> tuple[int, dict]:

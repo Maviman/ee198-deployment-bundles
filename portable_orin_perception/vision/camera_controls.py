@@ -126,6 +126,19 @@ def apply(cam, log=print) -> dict:
     return report
 
 
+def set_gain(device: str, value: int) -> bool:
+    return _set(device, list_controls(device), "gain", value) is not None
+
+
+def gain_range(device: str) -> tuple[int, int, int] | None:
+    """(current, min, max) of the camera's gain control, or None without one."""
+    for name in ALIASES["gain"]:
+        c = list_controls(device).get(name)
+        if c and "max" in c:
+            return int(c.get("value", c.get("min", 0))), int(c.get("min", 0)), int(c["max"])
+    return None
+
+
 def set_exposure(device: str, value_100us: int) -> bool:
     ctrls = list_controls(device)
     return (_set(device, ctrls, "exposure_mode", EXPOSURE_MANUAL) is not None

@@ -548,6 +548,7 @@ def cmd_scan(args, cfg: Config) -> None:
         step(f"scanning the arena from {v.target}" + (f", camera {i} of {len(slots)}" if len(slots) > 1 else ""))
         p = run_on(v, f'''
 if pid=$(svc_pid vision); then echo "(stopping the vision service: the camera can only be opened once)"; svc_stop vision >/dev/null; fi
+{"if pid=$(svc_pid feeds); then echo \"(stopping the feeds service: it holds the other cameras)\"; svc_stop feeds >/dev/null; fi" if cfg.cameras else ""}
 free_cameras
 cd portable_orin_perception && {v.python} -u scan_arena.py {extra}{slot_args}
 ''', lib=True, tty=not v.local)
@@ -737,7 +738,7 @@ def cmd_up(args, cfg: Config) -> None:
     # other cameras' previews (preview_port + k, which also serve /info.json and X-Tags);
     # otherwise the `feeds` service's ports.
     feeds = ",".join(f"http://{vis_addr}:{cfg.preview_port + k}" for k in range(1, len(cfg.cameras))) \
-        if len(cfg.cameras) >= 2 else ",".join(f"http://{vis_addr}:{p}" for p in cfg.feed_ports)
+        if cfg.cameras else ",".join(f"http://{vis_addr}:{p}" for p in cfg.feed_ports)
 
     if getattr(args, "restart", False):
         # svc_start leaves a running service alone, so a new model or car count needs this
@@ -771,7 +772,7 @@ svc_start vision portable_orin_perception {v.python} -u run_vision.py \
     --preview-port {cfg.preview_port} --pursuers {n} {cameras}
 sleep 0.5; sudo -n renice -n -10 -p $(pgrep -f "^python3 -u run_vision.py") >/dev/null 2>&1 && echo "vision loop at nice -10" || true
 ''' + (f"svc_start feeds portable_orin_perception nice -n 10 {v.python} -u tools/camera_feeds.py serve --secondary --fps 8 "
-       f"--port {min(cfg.feed_ports)} --pursuers {n}\n" if cfg.feed_ports and len(cfg.cameras) < 2 else ""),
+       f"--port {min(cfg.feed_ports)} --pursuers {n}\n" if cfg.feed_ports and not cfg.cameras else ""),
            lib=True, check=True, timeout=30)
 
     step("waiting for the pipeline to come up")

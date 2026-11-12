@@ -117,8 +117,33 @@ def match_layout(centers_px: dict, points: dict) -> tuple[dict | None, str]:
     seen_q = _quadrants(centers_px, y_down=True)
     conf_q = _quadrants(points, y_down=False)
     if seen_q is None:
-        return None, ("cannot tell which corner each tag is in (camera rotated near 45 deg, "
-                      "or two tags in one corner)")
+        # A camera at a corner of the arena looks along the diagonal: the tags sit top,
+        # left, right and bottom of the image and no quadrant can be called. Trust the ids
+        # then (the config says which corner each tag is taped in), but refuse a mirrored
+        # frame: a perspective view keeps the corners' cyclic order, so the tags must run
+        # round the image in the same sequence as round the floor.
+        ids = [k for k in centers_px if k in points]
+        if len(ids) < 4:
+            return None, "cannot tell which corner each tag is in, and fewer than 4 configured tags are in view"
+
+        def around(pts: dict, y_sign: float) -> list:
+            c = np.mean(np.array([pts[k] for k in ids], dtype=float), axis=0)
+            ang = {k: math.atan2(y_sign * (pts[k][1] - c[1]), pts[k][0] - c[0]) for k in ids}
+            return sorted(ids, key=lambda k: ang[k]), ang
+
+        seen_order, seen_ang = around(centers_px, -1.0)      # image y is down: flip to +y up
+        gaps = [(seen_ang[seen_order[(i + 1) % 4]] - seen_ang[seen_order[i]]) % (2 * math.pi) for i in range(4)]
+        if min(gaps) < math.radians(40):
+            return None, ("cannot tell which corner each tag is in: two tags sit in one corner of the image. "
+                          "Put one corner tag in each corner of the arena")
+        conf_order, _ = around(points, 1.0)
+        i0 = conf_order.index(seen_order[0])
+        if [conf_order[(i0 + i) % 4] for i in range(4)] != seen_order:
+            return None, ("the corner tags run round the image in a different order than round "
+                          "arena_test_6ft.yaml: a MIRRORED frame (two tags swapped on the floor). "
+                          "Tape each tag in the corner the config gives it")
+        return {k: points[k] for k in ids}, ("diagonal view (corner camera): corners assigned by tag id "
+                                             "as taped per arena_test_6ft.yaml; cyclic order checked, not mirrored")
     if conf_q is None or set(conf_q) != set(seen_q):
         return None, "calibration_points do not put one tag in each corner"
     by_quadrant = {q: points[k] for k, q in conf_q.items()}

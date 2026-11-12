@@ -54,13 +54,17 @@ def test_a_camera_turned_90_degrees_still_gives_image_up_as_plus_y():
     assert why
 
 
-@pytest.mark.parametrize("px", [
-    {10: (640, 40), 11: (1000, 360), 12: (640, 680), 13: (280, 360)},   # a diamond: camera at 45 deg
-    {10: (200, 50), 11: (900, 60), 12: (910, 680), 13: (880, 650)},    # two tags in one corner
-])
-def test_a_layout_it_cannot_call_fails_instead_of_guessing(px):
+def test_a_layout_it_cannot_call_fails_instead_of_guessing():
+    px = {10: (200, 50), 11: (900, 60), 12: (910, 680), 13: (880, 650)}    # two tags in one corner
     layout, why = match_layout(px, DOC)
     assert layout is None and why
+
+
+def test_a_diamond_view_trusts_the_ids():
+    # a camera at 45 deg: 10 top, 11 right, 12 bottom, 13 left: the config's cyclic order, so by id
+    px = {10: (640, 40), 11: (1000, 360), 12: (640, 680), 13: (280, 360)}
+    layout, why = match_layout(px, DOC)
+    assert layout == DOC and "diagonal" in why
 
 
 def _scan(monkeypatch, tmp_path, capsys, place):
@@ -107,3 +111,15 @@ def test_scan_reports_a_consistent_scale_when_the_config_is_right(monkeypatch, t
     line = next(l for l in out.splitlines() if "scale" in l)
     assert "[ ok ]" in line, line
     assert "layout" not in out.split("[4/5]")[1].split("[5/5]")[0], "no layout warning when it matches"
+
+
+def test_a_corner_camera_on_the_diagonal_assigns_by_id_and_catches_a_mirror():
+    # Tags seen top / right / bottom / left of the image (the X1 at a corner, 2026-11-11):
+    # 10 far (top), 11 and 13 at the sides, 12 near (bottom). Config: 10 top-left,
+    # 11 top-right, 12 bottom-right, 13 bottom-left, +y up.
+    px = {10: (640.0, 60.0), 11: (1200.0, 300.0), 12: (640.0, 680.0), 13: (80.0, 300.0)}
+    layout, why = match_layout(px, DOC)
+    assert layout == {k: DOC[k] for k in px} and "diagonal" in why
+    mirrored = {**px, 11: px[13], 13: px[11]}
+    layout, why = match_layout(mirrored, DOC)
+    assert layout is None and "MIRRORED" in why

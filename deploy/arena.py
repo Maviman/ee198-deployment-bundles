@@ -748,13 +748,17 @@ svc_start controller portable_n1_controller {c.python} -u run_controller.py --mo
     _ctl(cfg, "disarm")
     step(f"vision: {v.target} -- camera -> poses of {n} pursuer(s) + evader -> {ctrl_addr}:{cfg.pose_port}")
     # The other cameras go to the dashboard's tag check (the `feeds` service), started after
-    # the vision service, which they never touch.
+    # the vision service, which they never touch. The two share six cores, so the hot loop
+    # gets priority (nice -10 via sudo -n; a supervise restart loses it, the next `arena up`
+    # re-applies it) and the tag check runs at nice 10 and 8 fps: it is a picture for the
+    # operator, not a pose source (it was 80% of a core at 15 fps, and detection p95 showed it).
     run_on(v, f'''
 svc_pid vision >/dev/null || free_cameras
 svc_start vision portable_orin_perception {v.python} -u run_vision.py \
     --pose-target {ctrl_addr}:{cfg.pose_port} --telemetry {ctrl_addr}:{cfg.tel_port} \
     --preview-port {cfg.preview_port} --pursuers {n}
-''' + (f"svc_start feeds portable_orin_perception {v.python} -u tools/camera_feeds.py serve --secondary "
+sleep 0.5; sudo -n renice -n -10 -p $(pgrep -f "^python3 -u run_vision.py") >/dev/null 2>&1 && echo "vision loop at nice -10" || true
+''' + (f"svc_start feeds portable_orin_perception nice -n 10 {v.python} -u tools/camera_feeds.py serve --secondary --fps 8 "
        f"--port {min(cfg.feed_ports)} --pursuers {n}\n" if cfg.feed_ports else ""), lib=True, check=True, timeout=30)
 
     step("waiting for the pipeline to come up")

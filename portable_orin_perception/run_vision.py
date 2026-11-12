@@ -40,6 +40,12 @@ def main(argv=None) -> int:
     ap.add_argument("--preview-port", type=int, default=8090, help="MJPEG preview port, 0 = off")
     ap.add_argument("--preview-fps", type=float, default=10.0)
     ap.add_argument("--device", default=None, help="override config/camera.yaml device")
+    ap.add_argument("--camera", action="append", default=None, metavar="DEV[=HOMOGRAPHY]",
+                    help="a camera of a multi-camera arena, in slot order (repeat per camera): its "
+                         "device and, optionally, its calibration file (default: slot 0 "
+                         "config/arena_homography.yaml, slot k config/arena_homography.k.yaml). "
+                         "Each camera's poses are fused by tag size (vision/fusion.py); camera k's "
+                         "preview is on --preview-port + k")
     ap.add_argument("--camera-config", default=None)
     ap.add_argument("--marker-map", default=None)
     ap.add_argument("--pursuers", type=int, default=None,

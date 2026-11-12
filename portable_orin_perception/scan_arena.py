@@ -141,6 +141,10 @@ def main(argv=None) -> int:
     ap.add_argument("--tune-exposure", action="store_true")
     ap.add_argument("--frames", type=int, default=30)
     ap.add_argument("--device", default=None)
+    ap.add_argument("--slot", type=int, default=0,
+                    help="which camera of a multi-camera arena this is (0 = the first / only one). "
+                         "Slot k >= 1 reads config/camera.k.local.yaml and writes "
+                         "config/arena_homography.k.yaml")
     ap.add_argument("--synthetic", action="store_true", help="rendered arena, no camera")
     ap.add_argument("--out-dir", default=str(Path.home() / ".arena" / "scan"))
     ap.add_argument("--residual-warn-m", type=float, default=0.02)
@@ -151,7 +155,8 @@ def main(argv=None) -> int:
 
     cfg_dir = ROOT / "config"
     mm = load_marker_map(cfg_dir / "marker_map.yaml").with_pursuers(args.pursuers)
-    cam = load_camera_config(cfg_dir / "camera.yaml").with_overrides(device=args.device)
+    slot = int(args.slot or 0)
+    cam = load_camera_config(cfg_dir / "camera.yaml", slot=slot).with_overrides(device=args.device)
     arena_cfg = yaml.safe_load((cfg_dir / "arena_test_6ft.yaml").read_text(encoding="utf-8"))
     half = (arena_cfg["arena_width_m"] / 2.0, arena_cfg["arena_height_m"] / 2.0)
     points = {int(k): (float(v[0]), float(v[1])) for k, v in arena_cfg["calibration_points"].items()}
@@ -159,12 +164,12 @@ def main(argv=None) -> int:
     if args.synthetic:
         hpath = Path(args.out_dir).expanduser() / "synthetic_homography.yaml"
     else:
-        hpath = cfg_dir / "arena_homography.yaml"
+        hpath = cfg_dir / ("arena_homography.yaml" if slot == 0 else f"arena_homography.{slot}.yaml")
     spec = family_spec(mm.dictionary)
     rep = Report()
     out_dir = Path(args.out_dir).expanduser()
     out_dir.mkdir(parents=True, exist_ok=True)
-    print(f"arena scan: {mm.dictionary}, camera {cam.mode} on "
+    print(f"arena scan: {mm.dictionary}, camera {slot} {cam.mode} on "
           f"{'SYNTHETIC' if args.synthetic else cam.device}, arena {2 * half[0]:.2f} x {2 * half[1]:.2f} m")
 
     # ---------------------------------------------------------------- 1. camera
@@ -255,7 +260,9 @@ def main(argv=None) -> int:
             exp, gain, m = best
             raised = gain is not None and gain != gains[0]
             values = {"exposure": exp, "gain": gain} if raised else {"exposure": exp}
-            path = write_local_override(cfg_dir / "camera.yaml", **values)
+            if slot and args.device:
+                values["device"] = args.device        # pin this slot to its camera
+            path = write_local_override(cfg_dir / "camera.yaml", slot=slot, **values)
             ppm = 0.9 * min(cam.size) / (2.0 * half[0])            # ~px per metre, overhead camera
             blur_px = 1.4 * exp / 10000.0 * ppm
             rep.add(OK if exp <= TARGET_EXPOSURE else WARN, "exposure",
@@ -308,7 +315,8 @@ def main(argv=None) -> int:
     print("\n[4/5] arena calibration")
     from hive_perception.calibrate_arena import load_ros_camera_info  # noqa: E402
 
-    K, D = load_ros_camera_info(cfg_dir / "camera_info.yaml")
+    info = cfg_dir / f"camera_info.{slot}.yaml"
+    K, D = load_ros_camera_info(info if info.exists() else cfg_dir / "camera_info.yaml")
     corner_ids = [c for c in mm.calibration_corner_ids if c in points]
     # Median, not mean: one bad frame cannot drag a corner.
     centers = {c: np.median([marker_math.marker_center_px(x) for x in seen[c]], axis=0)

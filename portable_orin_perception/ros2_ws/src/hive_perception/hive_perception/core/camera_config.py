@@ -75,23 +75,38 @@ def _read(path: Path) -> dict:
     return data
 
 
-def load_camera_config(path, *, local_overrides: bool = True) -> CameraConfig:
-    """config/camera.yaml, with config/camera.local.yaml merged on top when present."""
+def local_override_path(path, slot: int | None = None) -> Path:
+    """camera.local.yaml next to ``path``; camera.<slot>.local.yaml for camera slot >= 1
+    (each corner camera has its own device, exposure and gain)."""
+    path = Path(path)
+    tag = "" if not slot else f".{int(slot)}"
+    return path.with_name(path.stem + tag + ".local" + path.suffix)
+
+
+def load_camera_config(path, *, local_overrides: bool = True, slot: int | None = None) -> CameraConfig:
+    """config/camera.yaml, with config/camera.local.yaml merged on top when present, then
+    config/camera.<slot>.local.yaml for a camera slot >= 1."""
     path = Path(path)
     data = _read(path) if path.exists() else {}
-    local = path.with_name(path.stem + ".local" + path.suffix)
-    if local_overrides and local.exists():
-        data.update(_read(local))
+    if local_overrides:
+        for local in ({local_override_path(path), local_override_path(path, slot)}):
+            if local.exists():
+                data.update(_read(local))
+        # a slot's own file wins over the shared one
+        own = local_override_path(path, slot)
+        if slot and own.exists():
+            data.update(_read(own))
     cfg = CameraConfig(**data)
     if cfg.exposure != "auto":
         cfg = replace(cfg, exposure=int(cfg.exposure))
     return replace(cfg, width=int(cfg.width), height=int(cfg.height), fps=int(cfg.fps))
 
 
-def write_local_override(path, **values) -> Path:
-    """Merge ``values`` into camera.local.yaml next to ``path``; returns its path."""
+def write_local_override(path, slot: int | None = None, **values) -> Path:
+    """Merge ``values`` into camera.local.yaml next to ``path`` (camera.<slot>.local.yaml
+    for a camera slot >= 1); returns its path."""
     path = Path(path)
-    local = path.with_name(path.stem + ".local" + path.suffix)
+    local = local_override_path(path, slot)
     data = _read(local) if local.exists() else {}
     data.update(values)
     local.write_text(

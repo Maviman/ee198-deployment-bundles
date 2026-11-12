@@ -106,7 +106,7 @@
 <main>
   <section id="alerts"></section>
   <section class="panel">
-    <h2>Overhead camera <span class="sub" id="camsub"></span></h2>
+    <h2><span id="camtitle">Overhead camera</span> <span class="sub" id="camsub"></span></h2>
     <div class="cam"><img id="video" alt=""><canvas id="overlay"></canvas>
       <div class="none" id="novideo">no preview (vision service not running?)</div></div>
   </section>
@@ -602,6 +602,7 @@ function render() {
   $("novideo").textContent = !S.preview ? "no preview configured on the hub"
     : !fresh("vision") ? "no camera: vision service not running (INITIALIZE starts it)"
     : cam.reconnects ? `camera: reconnecting (${cam.reason})…` : "camera: connecting…";
+  $("camtitle").textContent = v && v.cams && v.cams.length > 1 ? `Camera 1 of ${v.cams.length}: ${v.cams[0].name}` : "Overhead camera";
   if (v) $("camsub").textContent = `${v.mode} · ${v.fps} fps · ${v.source}`
     + (camLive && cam.lag != null ? (cam.lag < 150 ? " · preview live" : ` · preview ${(cam.lag / 1000).toFixed(1)} s behind`) : "");
 

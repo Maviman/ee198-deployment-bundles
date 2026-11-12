@@ -128,6 +128,9 @@ class Config:
                            cp["vision"]["repo"], cp["vision"]["python"])
         self.control = Role("control", c["host"], c.get("user", ""), c["repo"], c["python"],
                             c.get("tools_python", "python3"))
+        # [vision] cameras: by-id device paths in slot order for a multi-camera arena (two
+        # corner cameras); empty = the one camera of config/camera.yaml
+        self.cameras = [x.strip() for x in cp["vision"].get("cameras", "").split(",") if x.strip()]
         self.model = cp["fleet"]["model"]
         self.esp = cp["fleet"]["esp"]
         self.pursuers = cp["fleet"].get("pursuers", "auto").strip() or "auto"
@@ -539,19 +542,23 @@ def cmd_scan(args, cfg: Config) -> None:
         _ctl(cfg, "disarm")
     except SystemExit:
         warn(f"could not reach the control Orin ({cfg.control.target}) to disarm; scanning anyway")
-    step(f"scanning the arena from {v.target}")
-    p = run_on(v, f'''
+    slots = [(i, f" --slot {i} --device {shlex.quote(d)}") for i, d in enumerate(cfg.cameras)] or [(0, "")]
+    rc = 0
+    for i, slot_args in slots:
+        step(f"scanning the arena from {v.target}" + (f", camera {i} of {len(slots)}" if len(slots) > 1 else ""))
+        p = run_on(v, f'''
 if pid=$(svc_pid vision); then echo "(stopping the vision service: the camera can only be opened once)"; svc_stop vision >/dev/null; fi
 free_cameras
-cd portable_orin_perception && {v.python} -u scan_arena.py {extra}
+cd portable_orin_perception && {v.python} -u scan_arena.py {extra}{slot_args}
 ''', lib=True, tty=not v.local)
-    if not v.local:
-        dest = REPO / "arena_scan.png"
-        scp = subprocess.run(["scp", "-q", f"{v.target}:.arena/scan/latest.png", str(dest)])
-        if scp.returncode == 0:
-            print(f"\nsnapshot copied to {dest}")
-    if p.returncode != 0:
-        raise SystemExit(p.returncode)
+        if not v.local:
+            dest = REPO / ("arena_scan.png" if i == 0 else f"arena_scan.{i}.png")
+            scp = subprocess.run(["scp", "-q", f"{v.target}:.arena/scan/latest.png", str(dest)])
+            if scp.returncode == 0:
+                print(f"\nsnapshot copied to {dest}")
+        rc = rc or p.returncode
+    if rc != 0:
+        raise SystemExit(rc)
     print("\nNext: `arena up`." if not args.check else "")
 
 
@@ -726,7 +733,11 @@ def cmd_up(args, cfg: Config) -> None:
     ctrl_addr = _control_addr_from_vision(cfg)
     vis_addr = "127.0.0.1" if cfg.single else (
         v.host if cfg.vision_addr_from_control == "auto" else cfg.vision_addr_from_control)
-    feeds = ",".join(f"http://{vis_addr}:{p}" for p in cfg.feed_ports)
+    # The dashboard's tag-check panel: with several cameras in the vision service, its
+    # other cameras' previews (preview_port + k, which also serve /info.json and X-Tags);
+    # otherwise the `feeds` service's ports.
+    feeds = ",".join(f"http://{vis_addr}:{cfg.preview_port + k}" for k in range(1, len(cfg.cameras))) \
+        if len(cfg.cameras) >= 2 else ",".join(f"http://{vis_addr}:{p}" for p in cfg.feed_ports)
 
     if getattr(args, "restart", False):
         # svc_start leaves a running service alone, so a new model or car count needs this
@@ -752,14 +763,16 @@ svc_start controller portable_n1_controller {c.python} -u run_controller.py --mo
     # gets priority (nice -10 via sudo -n; a supervise restart loses it, the next `arena up`
     # re-applies it) and the tag check runs at nice 10 and 8 fps: it is a picture for the
     # operator, not a pose source (it was 80% of a core at 15 fps, and detection p95 showed it).
+    cameras = " ".join(f"--camera {shlex.quote(d)}" for d in cfg.cameras)
     run_on(v, f'''
 svc_pid vision >/dev/null || free_cameras
 svc_start vision portable_orin_perception {v.python} -u run_vision.py \
     --pose-target {ctrl_addr}:{cfg.pose_port} --telemetry {ctrl_addr}:{cfg.tel_port} \
-    --preview-port {cfg.preview_port} --pursuers {n}
+    --preview-port {cfg.preview_port} --pursuers {n} {cameras}
 sleep 0.5; sudo -n renice -n -10 -p $(pgrep -f "^python3 -u run_vision.py") >/dev/null 2>&1 && echo "vision loop at nice -10" || true
 ''' + (f"svc_start feeds portable_orin_perception nice -n 10 {v.python} -u tools/camera_feeds.py serve --secondary --fps 8 "
-       f"--port {min(cfg.feed_ports)} --pursuers {n}\n" if cfg.feed_ports else ""), lib=True, check=True, timeout=30)
+       f"--port {min(cfg.feed_ports)} --pursuers {n}\n" if cfg.feed_ports and len(cfg.cameras) < 2 else ""),
+           lib=True, check=True, timeout=30)
 
     step("waiting for the pipeline to come up")
     url = hub_url(cfg)

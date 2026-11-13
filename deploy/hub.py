@@ -39,6 +39,10 @@ never slow a pose frame or a command.
     POST /api/fleet        APPLY in the fleet menu, same rules as /api/init: body
                            {"pursuers": N, "model": "models/<name>"} runs `arena fleet
                            --pursuers N --model M`, then `arena up --restart`.
+    POST /api/manual       MANUAL DRIVE, same rules as /api/arm's caller check: body
+                           {"thr": t, "steer": s, "car": i}; the controller drives that car
+                           while the page keeps sending (0.3 s deadman), never while armed.
+    POST /api/manual_off   end manual drive (E-stop). STOP also ends it.
     POST /api/flash        FLASH CAR, same rules as /api/init: `<--arena-cli> flash --usb`
                            (the one ESP32 on this Orin's USB), then `arena up`.
     POST /api/scan         CALIBRATE, same rules as /api/init: `<--arena-cli> scan
@@ -337,11 +341,11 @@ class Hub:
             }
 
     # ---------------------------------------------------------------- control
-    def _ctl(self, cmd: str) -> dict:
+    def _ctl(self, cmd: str, **fields) -> dict:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.settimeout(1.0)
         try:
-            s.sendto(json.dumps({"cmd": cmd}).encode("utf-8"), ("127.0.0.1", self.args.control_port))
+            s.sendto(json.dumps({"cmd": cmd, **fields}).encode("utf-8"), ("127.0.0.1", self.args.control_port))
             return json.loads(s.recvfrom(1024)[0].decode("utf-8"))
         except (OSError, ValueError) as exc:
             return {"error": f"controller did not answer ({exc}); if it is not running the "
@@ -351,6 +355,27 @@ class Hub:
 
     def disarm(self) -> dict:
         return self._ctl("disarm")
+
+    def manual(self, body) -> tuple[int, dict]:
+        """MANUAL DRIVE: one command for one car, passed to the controller, which drives it
+        until the page stops refreshing (its own 0.3 s deadman). Refused while armed."""
+        body = body if isinstance(body, dict) else {}
+
+        def num(k):
+            try:
+                v = float(body.get(k, 0.0))
+            except (TypeError, ValueError):
+                return 0.0
+            return 0.0 if v != v else max(-1.0, min(1.0, v))
+        try:
+            car = int(body.get("car", 0) or 0)
+        except (TypeError, ValueError):
+            car = 0
+        reply = self._ctl("manual", thr=num("thr"), steer=num("steer"), car=car)
+        return (409 if "error" in reply else 200), reply
+
+    def manual_off(self) -> tuple[int, dict]:
+        return 200, self._ctl("manual_off")
 
     def readiness(self) -> dict:
         """Everything that must be true before a START is accepted. Judged here, from the
@@ -789,7 +814,8 @@ def make_handler(hub: Hub):
         def do_POST(self):
             if self.path.startswith("/api/stop"):
                 self._json(200, hub.disarm())
-            elif self.path.startswith(("/api/arm", "/api/init", "/api/scan", "/api/fleet", "/api/flash")):
+            elif self.path.startswith(("/api/arm", "/api/init", "/api/scan", "/api/fleet", "/api/flash",
+                                       "/api/manual")):
                 why = self._may_control()
                 if why:
                     self._json(403, {"error": why})
@@ -801,6 +827,10 @@ def make_handler(hub: Hub):
                     self._json(*hub.set_fleet(self._body()))
                 elif self.path.startswith("/api/flash"):
                     self._json(*hub.flash())
+                elif self.path.startswith("/api/manual_off"):
+                    self._json(*hub.manual_off())
+                elif self.path.startswith("/api/manual"):
+                    self._json(*hub.manual(self._body()))
                 else:
                     self._json(*hub.initialize())
             else:

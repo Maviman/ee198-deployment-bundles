@@ -38,6 +38,8 @@ import select
 import socket
 import time
 
+import numpy as np
+
 from pc_controller.pose_stream import UdpPoseSource
 
 
@@ -133,7 +135,11 @@ class Telemetry:
 
 
 class ControlPort:
-    """Localhost-only UDP command port: {"cmd": "arm"|"disarm"|"status"}."""
+    """Localhost-only UDP command port: {"cmd": "arm"|"disarm"|"status"|"manual"|"manual_off"}.
+
+    "manual" ({"cmd": "manual", "thr": t, "steer": s, "car": i}) drives car i by hand (the
+    dashboard's manual drive): refused while the policy is armed, and it lasts
+    MANUAL_DEADMAN_S unless refreshed, so a closed page or a dropped network stops the car."""
 
     def __init__(self, port: int | None) -> None:
         self.sock = None
@@ -143,7 +149,7 @@ class ControlPort:
             self.sock.setblocking(False)
 
     def poll(self):
-        """Yield (cmd, reply_addr) for every pending command."""
+        """Yield (cmd, message, reply_addr) for every pending command."""
         if self.sock is None:
             return
         while True:
@@ -152,7 +158,8 @@ class ControlPort:
             except (BlockingIOError, ConnectionResetError, OSError):
                 return
             try:
-                yield str(json.loads(raw.decode("utf-8")).get("cmd", "")), addr
+                msg = json.loads(raw.decode("utf-8"))
+                yield str(msg.get("cmd", "")), msg, addr
             except (ValueError, AttributeError):
                 continue
 
@@ -161,6 +168,18 @@ class ControlPort:
             self.sock.sendto(json.dumps(payload).encode("utf-8"), addr)
         except OSError:
             pass
+
+
+MANUAL_DEADMAN_S = 0.3        # manual drive stops this long after the last "manual" command
+MANUAL_PERIOD_S = 0.05        # manual commands go to the car at 20 Hz, poses or not
+
+
+def _clamp1(v) -> float:
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return 0.0
+    return 0.0 if v != v else max(-1.0, min(1.0, v))
 
 
 def run_realtime(loop, link, *, pose_port: int, tick_hz: float = 10.0, stall_s: float = 0.3,
@@ -194,6 +213,8 @@ def run_realtime(loop, link, *, pose_port: int, tick_hz: float = 10.0, stall_s: 
     last_tel = 0.0
     last_keepalive = 0.0
     stall_reason = ""
+    manual = None                        # {"car", "thr", "steer", "until"} while driven by hand
+    last_manual_send = 0.0
     log(f"listening for pose frames on UDP :{pose_port}; tick {tick_hz:g} Hz; "
         f"{'DISARMED until `arena go`' if not armed else 'ARMED'} (ctrl-C to stop)")
     if hold is not None:
@@ -231,6 +252,8 @@ def run_realtime(loop, link, *, pose_port: int, tick_hz: float = 10.0, stall_s: 
             "hold_radius": None if hold is None else hold.radius,
             "hold": None if hold is None else list(hold.held),
             "roles": list(getattr(loop, "roles", None) or []) or None,   # role commanders only
+            "manual": None if manual is None else {"car": manual["car"],
+                                                   "cmd": [round(manual["thr"], 3), round(manual["steer"], 3)]},
         })
 
     def estop(reason: str) -> None:
@@ -242,22 +265,66 @@ def run_realtime(loop, link, *, pose_port: int, tick_hz: float = 10.0, stall_s: 
     try:
         while stop is None or not stop.is_set():
             now = time.perf_counter()
-            for cmd, addr in ctl.poll():
+            for cmd, msg, addr in ctl.poll():
+                error = None
                 if cmd == "arm":
+                    if manual is not None:
+                        manual = None
+                        log("MANUAL DRIVE ended: armed by operator")
                     armed = True
                     log("ARMED by operator")
                 elif cmd == "disarm":
                     if armed:
                         log("DISARMED by operator -> E-stop")
+                    if manual is not None:
+                        log("MANUAL DRIVE ended by STOP")
                     armed = False
+                    manual = None
                     estop("operator")
-                ctl.reply(addr, {"armed": armed, "state": state, "ticks": ticks})
+                elif cmd == "manual":
+                    car = int(msg.get("car", 0) or 0)
+                    if armed:
+                        error = "the policy is driving (ARMED): press STOP first"
+                    elif link is None:
+                        error = "no car link (dry run)"
+                    elif not 0 <= car < n:
+                        error = f"car {car} is not in this fleet (0..{n - 1})"
+                    else:
+                        if manual is None:
+                            log(f"MANUAL DRIVE on: car {car} driven from the dashboard")
+                        manual = {"car": car, "thr": _clamp1(msg.get("thr")), "steer": _clamp1(msg.get("steer")),
+                                  "until": now + MANUAL_DEADMAN_S}
+                elif cmd == "manual_off":
+                    if manual is not None:
+                        log("MANUAL DRIVE off -> E-stop")
+                        estop("manual off")
+                    manual = None
+                reply = {"armed": armed, "state": state, "ticks": ticks, "manual": manual is not None}
+                if error:
+                    reply["error"] = error
+                ctl.reply(addr, reply)
+
+            # Manual drive: the operator's command at 20 Hz whatever the poses do, until
+            # the dashboard stops refreshing it (MANUAL_DEADMAN_S), then an E-stop.
+            if manual is not None and link is not None:
+                if now > manual["until"]:
+                    log("MANUAL DRIVE stopped: no command from the dashboard for "
+                        f"{MANUAL_DEADMAN_S:g} s -> E-stop")
+                    manual = None
+                    estop("manual deadman")
+                elif now - last_manual_send >= MANUAL_PERIOD_S:
+                    act = np.zeros(2 * n)
+                    act[2 * manual["car"]] = manual["thr"]
+                    act[2 * manual["car"] + 1] = manual["steer"]
+                    link.send_commands(act)
+                    last_manual_send = now
+                    last_action = act
 
             # Not driving (waiting for the first pose, or stalled): keep telling
             # every car to hold E-stop at 2 Hz. The cars would sit in failsafe
             # anyway; this keeps their ACKs, and so the dashboard's radio health,
             # alive while you are checking the setup.
-            if state != "RUNNING" and link is not None and now - last_keepalive > 0.5:
+            if state != "RUNNING" and manual is None and link is not None and now - last_keepalive > 0.5:
                 link.send_stop()
                 last_keepalive = now
 
@@ -281,7 +348,8 @@ def run_realtime(loop, link, *, pose_port: int, tick_hz: float = 10.0, stall_s: 
                     stall_reason = ("pose frames arriving but too old (perception latency over budget)"
                                     if frames_arriving else "no pose frames")
                     log(f"POSE FEED STALLED >{stall_s:.1f}s ({stall_reason}) -> E-stop, waiting")
-                    estop("stall")
+                    if manual is None:            # manual drive needs no poses
+                        estop("stall")
                     loop.reset()          # stale histories would corrupt velocity estimates
                     if hold is not None:
                         hold.reset()
@@ -317,7 +385,7 @@ def run_realtime(loop, link, *, pose_port: int, tick_hz: float = 10.0, stall_s: 
             if hold is not None:
                 action = hold.apply(action, pursuers, evader, log)
             t_done = time.perf_counter()
-            if link is not None:
+            if link is not None and manual is None:
                 if armed:
                     link.send_commands(action)
                 else:
@@ -337,7 +405,9 @@ def run_realtime(loop, link, *, pose_port: int, tick_hz: float = 10.0, stall_s: 
             if vis_lat is not None:
                 w_vis.add(vis_lat * 1000.0)
                 w_total.add(vis_lat * 1000.0 + ctl_ms)
-            last_action, last_poses = action, (pursuers, evader)
+            if manual is None:
+                last_action = action
+            last_poses = (pursuers, evader)
             if now - last_tel > 0.09:
                 last_tel = now
                 send_state_telemetry(now)

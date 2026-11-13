@@ -56,6 +56,12 @@
   .cam .none { position: absolute; inset: 0; display: grid; place-items: center; color: var(--dim); }
   #map { width: 100%; aspect-ratio: 1; display: block; }
   #feedpanel { grid-column: 1 / -1; }
+  .manual { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; margin-bottom: 6px; }
+  .manual label { color: var(--dim); font-size: 12px; display: flex; gap: 6px; align-items: center; }
+  .manual .keys span { display: inline-block; min-width: 26px; padding: 3px 6px; margin-right: 4px; text-align: center;
+    border: 1px solid var(--line); border-radius: 4px; font: 12px var(--mono); color: var(--dim); }
+  .manual .keys span.on { background: var(--ok); color: #04210b; border-color: var(--ok); }
+  button.act.manualon { background: var(--warn); color: #231a00; border-color: var(--warn); }
   .feeds { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); }
   .feed .sub { font-family: var(--mono); margin-top: 4px; }
   .row3 { grid-column: 1 / -1; display: grid; gap: 12px;
@@ -114,6 +120,20 @@
   <section class="panel">
     <h2>Arena <span class="sub" id="mapsub"></span></h2>
     <canvas id="map" width="600" height="600"></canvas>
+  </section>
+  <section class="panel" id="manualpanel">
+    <h2>Manual drive (debug) <span class="sub" id="manualsub"></span></h2>
+    <div class="manual">
+      <button class="act" id="manualbtn" title="Drive the car by hand from this page. Only from a browser on the control Orin, and only while the policy is not armed.">MANUAL DRIVE: OFF</button>
+      <label>motor power <input type="range" id="mpower" min="0" max="100" value="60"> <span id="mpowerv"></span></label>
+      <label>turn <input type="range" id="msteer" min="0" max="100" value="100"> <span id="msteerv"></span></label>
+      <div class="keys"><span id="kW">W</span><span id="kA">A</span><span id="kS">S</span><span id="kD">D</span><span id="kSp">SPACE</span></div>
+      <div class="sub" id="manualcmd"></div>
+    </div>
+    <div class="sub">W / S: forward / reverse at the motor power. A / D: turn left / right by the turn amount. SPACE or
+      releasing every key: stop. The car stops by itself 0.3 s after this page stops sending (tab hidden, page closed,
+      network lost). STOP ends manual drive. Binary drive on the car (the current setting) runs the motor at full
+      power whenever motor power is 34% or more, and not at all below that.</div>
   </section>
   <section class="panel" id="feedpanel">
     <h2>Corner cameras: tag check <span class="sub" id="feedsub"></span></h2>
@@ -334,6 +354,7 @@ function renderFeeds() {
 
 let stopError = null;
 $("stop").onclick = async () => {
+  if (manualOn) stopManual("STOP pressed");
   $("stop").textContent = "STOPPING…";
   let msg = null;
   try {
@@ -358,6 +379,64 @@ async function post(path, body) {
   try { j = await r.json(); } catch (e) { /* no body */ }
   return { ok: r.ok, j };
 }
+// MANUAL DRIVE: while ON, the page sends one command every 100 ms (zero when no key is held);
+// the controller drives car 0 with it and stops the car 0.3 s after the last one arrives.
+let manualOn = false, manualTimer = null, manualErr = null;
+const keys = { w: false, a: false, s: false, d: false };
+function manualCmd() {
+  const p = +$("mpower").value / 100, t = +$("msteer").value / 100;
+  return { thr: keys.w === keys.s ? 0 : (keys.w ? p : -p), steer: keys.a === keys.d ? 0 : (keys.a ? t : -t), car: 0 };
+}
+function showKeys() {
+  for (const [k, id] of [["w", "kW"], ["a", "kA"], ["s", "kS"], ["d", "kD"]]) $(id).classList.toggle("on", manualOn && keys[k]);
+  $("mpowerv").textContent = $("mpower").value + "%";
+  $("msteerv").textContent = $("msteer").value + "%";
+  const c = manualCmd();
+  $("manualcmd").textContent = manualOn ? `sending throttle ${c.thr.toFixed(2)}, steer ${c.steer.toFixed(2)}`
+    + (manualErr ? ` · ${manualErr}` : "") : (manualErr || "");
+}
+async function manualTick() {
+  if (!manualOn) return;
+  if (document.hidden) { stopManual("tab hidden: stopped"); return; }
+  try {
+    const { ok, j } = await post("/api/manual", manualCmd());
+    if (!ok) { stopManual("refused: " + (j.error || "unknown")); return; }
+    manualErr = null;
+  } catch (e) { manualErr = "hub unreachable (the car stops by itself)"; }
+  showKeys();
+}
+function startManual() {
+  manualOn = true; manualErr = null;
+  $("manualbtn").textContent = "MANUAL DRIVE: ON"; $("manualbtn").classList.add("manualon");
+  manualTimer = setInterval(manualTick, 100);
+  manualTick();
+}
+function stopManual(why) {
+  const was = manualOn;
+  manualOn = false;
+  for (const k in keys) keys[k] = false;
+  if (manualTimer) { clearInterval(manualTimer); manualTimer = null; }
+  $("manualbtn").textContent = "MANUAL DRIVE: OFF"; $("manualbtn").classList.remove("manualon");
+  manualErr = why || null;
+  if (was) post("/api/manual_off").catch(() => {});
+  showKeys();
+}
+$("manualbtn").onclick = () => (manualOn ? stopManual() : startManual());
+$("mpower").oninput = $("msteer").oninput = showKeys;
+document.addEventListener("keydown", (e) => {
+  if (!manualOn || e.target.tagName === "INPUT" && e.target.type !== "range") return;
+  const k = e.key.toLowerCase();
+  if (k === " ") { for (const q in keys) keys[q] = false; e.preventDefault(); manualTick(); return; }
+  if (k in keys) { if (!keys[k]) { keys[k] = true; manualTick(); } e.preventDefault(); }
+});
+document.addEventListener("keyup", (e) => {
+  const k = e.key.toLowerCase();
+  if (k in keys) { keys[k] = false; if (manualOn) manualTick(); }
+});
+window.addEventListener("blur", () => { for (const k in keys) keys[k] = false; showKeys(); });
+document.addEventListener("visibilitychange", () => { if (document.hidden && manualOn) stopManual("tab hidden: stopped"); });
+showKeys();
+
 // FLASH CAR asks first, like START: the first click arms the button for 5 s, the second flashes.
 let flashConfirmUntil = 0;
 $("flash").onclick = async () => {
@@ -579,6 +658,14 @@ function render() {
     : `Build the firmware and flash the car on ${usb[0]} (about 2.5 min). Click twice within 5 s. `
       + "The car reboots; its saved settings (index, pins, servo, radio) are kept. Close any serial monitor first.";
   renderFleet();
+  $("manualbtn").disabled = !manualOn && (!canCtl || armedNow || !(c && fresh("control")));
+  $("manualbtn").title = !canCtl ? "MANUAL DRIVE only works from a browser on the control Orin itself"
+    : armedNow ? "the policy is driving (ARMED): press STOP first"
+    : !(c && fresh("control")) ? "the controller is not running (INITIALIZE)"
+    : "Drive car 0 by hand with W A S D. Click again (or STOP) to end.";
+  const mc = c && c.manual;
+  $("manualsub").textContent = mc ? `controller: car ${mc.car} driven by hand, cmd [${mc.cmd.join(", ")}]`
+    : manualOn ? "waiting for the controller…" : "";
   $("fleetapply").disabled = !(canCtl && S.can_init) || armedNow || !!job.running || !$("fleetmodel").value;
   $("fleetapply").textContent = job.running && job.kind === "fleet" ? "APPLYING…" : "APPLY";
   $("fleetapply").title = !canCtl ? "APPLY only works from a browser on the control Orin itself"

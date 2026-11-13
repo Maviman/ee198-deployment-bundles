@@ -39,6 +39,7 @@ class FakeController:
         self.sock.settimeout(0.05)
         self.port = self.sock.getsockname()[1]
         self.cmds: list[str] = []
+        self.msgs: list[dict] = []
         self.armed = False
         self.alive = True
         threading.Thread(target=self._run, daemon=True).start()
@@ -49,8 +50,10 @@ class FakeController:
                 raw, addr = self.sock.recvfrom(1024)
             except (socket.timeout, OSError):
                 continue
-            cmd = json.loads(raw)["cmd"]
+            msg = json.loads(raw)
+            cmd = msg["cmd"]
             self.cmds.append(cmd)
+            self.msgs.append(msg)
             if cmd == "arm":
                 self.armed = True
             elif cmd == "disarm":
@@ -537,3 +540,30 @@ def test_a_silent_step_still_gets_killed_at_its_time_limit(rig, tmp_path, monkey
     assert r.post("/api/init")[0] == 200
     job = wait_job(r, limit=8.0)
     assert job["ok"] is False and "took longer than 1 s" in job["lines"][-1]
+
+
+
+# ---------------------------------------------------------- MANUAL DRIVE (2026-11-13) ----
+def test_manual_drive_is_passed_to_the_controller_clamped(rig):
+    r = rig()
+    assert r.post("/api/manual", data={"thr": 0.6, "steer": -2, "car": 0})[0] == 200
+    assert r.fc.msgs[-1] == {"cmd": "manual", "thr": 0.6, "steer": -1.0, "car": 0}
+    assert r.post("/api/manual", data={"thr": "fast"})[0] == 200
+    assert r.fc.msgs[-1]["thr"] == 0.0, "garbage is zero, never a guess"
+    assert r.post("/api/manual_off")[0] == 200 and r.fc.cmds[-1] == "manual_off"
+
+
+def test_manual_drive_needs_the_control_orin_and_the_header(rig, monkeypatch):
+    r = rig()
+    assert r.post("/api/manual", headers={}, data={"thr": 1})[0] == 403
+    monkeypatch.setattr(hubmod, "is_local", lambda addr: False)
+    assert r.post("/api/manual", data={"thr": 1})[0] == 403
+    assert "manual" not in r.fc.cmds
+
+
+def test_a_controller_refusal_comes_back_as_409(rig, monkeypatch):
+    r = rig()
+    monkeypatch.setattr(r.hub, "_ctl", lambda cmd, **f: {"armed": True, "manual": False,
+                                                         "error": "the policy is driving (ARMED): press STOP first"})
+    code, body = r.post("/api/manual", data={"thr": 1})
+    assert code == 409 and "ARMED" in body["error"]

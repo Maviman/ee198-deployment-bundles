@@ -138,10 +138,10 @@ class Harness:
             self.frame(time.perf_counter(), **kw)
             n += 1
 
-    def command(self, cmd: str) -> dict:
+    def command(self, cmd: str, **fields) -> dict:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.settimeout(2.0)
-        s.sendto(json.dumps({"cmd": cmd}).encode(), ("127.0.0.1", self.ctl_port))
+        s.sendto(json.dumps({"cmd": cmd, **fields}).encode(), ("127.0.0.1", self.ctl_port))
         return json.loads(s.recvfrom(1024)[0])
 
     def close(self) -> None:
@@ -275,3 +275,42 @@ def test_malformed_frames_are_skipped_not_fatal(harness):
     h.stream(0.5)
     assert h.thread.is_alive()
     assert driving(h.car.packets)
+
+
+
+# ------------------------------------------------------- manual drive (2026-11-13) ----
+def test_manual_drive_reaches_the_car_without_any_poses_and_stops_on_its_deadman(harness):
+    h = harness(start_disarmed=True)                  # no pose frames at all: the camera can be off
+    t0 = time.perf_counter()
+    while time.perf_counter() - t0 < 0.5:             # the dashboard refreshes at ~10 Hz
+        assert h.command("manual", thr=0.8, steer=-0.5)["manual"] is True
+        time.sleep(0.1)
+    drive = [p for _t, p in h.car.packets if not p["estop"]]
+    assert len(drive) >= 6, "manual commands go out at 20 Hz"
+    assert all(p["cmd"][0] == [0.8, -0.5] for p in drive)
+    n = len(h.car.packets)
+    time.sleep(0.6)                                   # the page stopped refreshing
+    after = [p for _t, p in h.car.packets[n:]]
+    assert after and after[-1]["estop"], "deadman: E-stop once the commands stop"
+    assert any("MANUAL DRIVE stopped" in line for line in h.logs)
+
+
+def test_manual_drive_is_refused_while_armed_and_ended_by_stop_or_arm(harness):
+    h = harness(start_disarmed=False)
+    reply = h.command("manual", thr=1.0, steer=0.0)
+    assert "error" in reply and reply["manual"] is False, "never while the policy drives"
+    h.command("disarm")
+    assert h.command("manual", thr=0.5, steer=0.0)["manual"] is True
+    assert h.command("disarm")["manual"] is False, "STOP ends manual drive"
+    assert h.command("manual", thr=0.5, steer=0.0)["manual"] is True
+    assert h.command("manual_off")["manual"] is False
+    time.sleep(0.15)
+    assert h.car.packets[-1][1]["estop"], "manual off = E-stop"
+
+
+def test_manual_values_are_clamped_and_garbage_is_zero(harness):
+    h = harness(start_disarmed=True)
+    h.command("manual", thr=5, steer="left")
+    time.sleep(0.15)
+    drive = [p for _t, p in h.car.packets if not p["estop"]]
+    assert drive and drive[-1]["cmd"][0] == [1.0, 0.0]

@@ -162,6 +162,7 @@
  *   servo [centre left right]    show / set the servo pulse widths (us)
  *   servo pin <n>                show / set the servo GPIO (default 19)
  *   scope                        measure the drive and servo pads (act servo)
+ *   ramp [ms]                    show / set the drive soft-start (default 400, 0 = off)
  *
  * PIN RULES (ESP32-S3-WROOM-1, DevKitC-1). The setter refuses anything else:
  *   OK:     1 2 4-18 21 39-42 45 46 47 48
@@ -195,6 +196,7 @@
 #include "soc/gpio_periph.h"          // GPIO_PIN_MUX_REG[]: input enable for `scope`
 #include "soc/io_mux_reg.h"
 #include "soc/usb_serial_jtag_reg.h"  // USB_SERIAL_JTAG_USB_PAD_ENABLE: GPIO19/20 back from the USB PHY
+#include "esp_system.h"               // esp_reset_reason(): a brown-out shows in the probe reply
 #endif
 
 // ---- EDIT THESE ------------------------------------------------------------
@@ -207,7 +209,7 @@
 #include <ArduinoOTA.h>
 #endif
 
-#define FW_VERSION "2026.11-servo-uart-ble"
+#define FW_VERSION "2026.11-servo-ramp-uart-ble"
 
 const uint16_t UDP_PORT = 8888;
 
@@ -244,6 +246,13 @@ const int DEFAULT_SERVO_CENTER_US = 1500;
 const int DEFAULT_SERVO_LEFT_US = 1800;      // +steer
 const int DEFAULT_SERVO_RIGHT_US = 1200;     // -steer
 const bool DEFAULT_DRIVE_PWM = true;
+// Drive soft-start (serial `ramp <ms>`, 0 = off): the drive level rises from START_LEVEL to
+// its target over this long instead of jumping. A motor switched straight to full power
+// draws a stall-current spike that can sag a shared battery below the ESP32's brown-out
+// threshold: on the car 2026-11-13 the board reset every ~6 s at full throttle while the
+// servo kept moving. Releasing and reversing stay instant.
+const int DEFAULT_RAMP_MS = 400;
+const double RAMP_START_LEVEL = 0.35;
 // Deadband, full-on, binary threshold and the reversing gap: see button_mod.h.
 // ----------------------------------------------------------------------------
 
@@ -286,6 +295,9 @@ bool servoLedcOk = false, driveLedcOk = false;
 double driveCmd = 0.0, steerCmd = 0.0;
 int driveDir = 0;                      // direction last driven: +1, -1, 0
 unsigned long driveGapUntil = 0;
+int rampMs = DEFAULT_RAMP_MS;
+double driveLevel = 0.0;               // what the drive pin is at now, 0..1
+unsigned long lastDriveMs = 0;
 
 // One axis = two opposite buttons: throttle = FWD (0) / BACK (1), steer =
 // LEFT (2) / RIGHT (3), as indices into pins[].
@@ -346,6 +358,25 @@ void configurePins() {
   }
 }
 
+// Why the chip last reset. "brownout" on a car that runs off one battery means the motor
+// pulled the supply under the ESP32's threshold.
+const char *resetReason() {
+#ifdef ARDUINO_ARCH_ESP32
+  switch (esp_reset_reason()) {
+    case ESP_RST_POWERON: return "poweron";
+    case ESP_RST_BROWNOUT: return "brownout";
+    case ESP_RST_SW: return "software";
+    case ESP_RST_PANIC: return "panic";
+    case ESP_RST_INT_WDT: case ESP_RST_TASK_WDT: case ESP_RST_WDT: return "watchdog";
+    case ESP_RST_EXT: return "external";
+    case ESP_RST_DEEPSLEEP: return "deepsleep";
+    default: return "other";
+  }
+#else
+  return "host";
+#endif
+}
+
 // ------------------------------------------------------------------ servo car
 bool servoPinAllowed(int p) {
   // The button pins, plus 19/20: native USB, unused (the console is the UART bridge).
@@ -387,14 +418,27 @@ void serviceServoCar() {
     driveDir = 0;
     driveGapUntil = millis() + DRIVE_GAP_MS;
   }
+  unsigned long now = millis();
+  unsigned long dt = now - lastDriveMs;
+  lastDriveMs = now;
   if (want == 0 || m <= 0.0) {
     driveDir = 0;
+    driveLevel = 0.0;
     driveOut(0, 0);
-  } else if ((long)(millis() - driveGapUntil) < 0) {
+  } else if ((long)(now - driveGapUntil) < 0) {
+    driveLevel = 0.0;
     driveOut(0, 0);
   } else {
+    if (want != driveDir) driveLevel = 0.0;           // a new direction starts from rest
     driveDir = want;
-    driveOut(want, m);
+    if (rampMs <= 0 || m <= driveLevel) {
+      driveLevel = m;                                 // slowing down is never ramped
+    } else {
+      if (driveLevel < RAMP_START_LEVEL) driveLevel = m < RAMP_START_LEVEL ? m : RAMP_START_LEVEL;
+      else driveLevel += (1.0 - RAMP_START_LEVEL) * (double)dt / rampMs;
+      if (driveLevel > m) driveLevel = m;
+    }
+    driveOut(want, driveLevel);
   }
   servoWriteUs(servoUsFor(steerCmd));
 }
@@ -402,6 +446,7 @@ void serviceServoCar() {
 void servoCarNeutral() {
   driveCmd = steerCmd = 0.0;
   driveDir = 0;
+  driveLevel = 0.0;
   if (!actAttached) return;
   driveOut(0, 0);
   servoWriteUs(servoCenterUs);
@@ -540,6 +585,8 @@ void loadSettings() {
   int a = prefs.getInt("act", DEFAULT_ACT);
   act = (a == ACT_SERVO) ? ACT_SERVO : ACT_BUTTONS;
   drivePwm = prefs.getBool("drv_pwm", DEFAULT_DRIVE_PWM);
+  int rm = prefs.getInt("ramp_ms", DEFAULT_RAMP_MS);
+  rampMs = (rm >= 0 && rm <= 3000) ? rm : DEFAULT_RAMP_MS;
   int sp = prefs.getInt("servo_pin", DEFAULT_SERVO_PIN);
   servoPin = (servoPinAllowed(sp) && sp != pins[0] && sp != pins[1]) ? sp : DEFAULT_SERVO_PIN;
   int sc = prefs.getInt("srv_c", DEFAULT_SERVO_CENTER_US);
@@ -561,6 +608,7 @@ void printSettings() {
     Serial.printf("act SERVO: drive FWD=GPIO%d BACK=GPIO%d %s", pins[0], pins[1],
                   drivePwm ? "PWM" : "BINARY");
     if (drivePwm) Serial.printf(" (limit %.2f)", throttleLimit);
+    Serial.printf(", soft-start %d ms", rampMs);
     Serial.printf(" | servo GPIO%d centre %d us, left %d us, right %d us | radio %s\n",
                   servoPin, servoCenterUs, servoLeftUs, servoRightUs, radioName(radio));
     return;
@@ -765,6 +813,12 @@ void handleConsoleLine(char *line) {
     printSettings();
   } else if (strcmp(line, "test") == 0) {
     runButtonTest();
+  } else if (strcmp(line, "ramp") == 0) {
+    if (hasArg && !refusedWhileDriving()) {
+      if (parseLong(arg, n) && n >= 0 && n <= 3000) { rampMs = (int)n; prefs.putInt("ramp_ms", rampMs); }
+      else Serial.println("REJECTED: ramp <ms>, 0..3000 (0 = off)");
+    }
+    printSettings();
   } else if (strcmp(line, "scope") == 0) {
     runScope();
   } else if (strcmp(line, "act") == 0) {
@@ -827,7 +881,7 @@ void handleConsoleLine(char *line) {
     Serial.println("commands: index [n] | mode [mod|binary] | slot [ms] | limit [0.1..1] | "
                    "pins [fwd back left right] | radio [wifi|ble|both] | test | "
                    "act [buttons|servo] | drive [pwm|binary] | servo [centre left right] | "
-                   "servo pin <n> | scope");
+                   "servo pin <n> | ramp [ms] | scope");
   }
 }
 
@@ -860,19 +914,19 @@ const char *rssiText(const Reply &to, char *buf, size_t size) {
 // Discovery / status reply. Pure information: reading it changes nothing.
 void sendInfo(const Reply &to) {
   char rssi[8];
-  char buf[360];
+  char buf[420];
   snprintf(buf, sizeof(buf),
            "{\"car\":%d,\"fw\":\"%s\",\"mac\":\"%s\",\"failsafe\":%s,"
            "\"up_s\":%lu,\"last_seq\":%ld,\"rssi\":%s,\"ota\":%s,"
            "\"act\":\"%s\",\"mode\":\"%s\",\"slot_ms\":%d,\"thr_limit\":%.2f,"
-           "\"radio\":\"%s\",\"via\":\"%s\"}",
+           "\"radio\":\"%s\",\"via\":\"%s\",\"rst\":\"%s\",\"ramp_ms\":%d}",
            carIndex, FW_VERSION, WiFi.macAddress().c_str(),
            failsafeActive ? "true" : "false", millis() / 1000UL, lastSeq,
            rssiText(to, rssi, sizeof(rssi)), otaEnabled ? "true" : "false",
            act == ACT_SERVO ? "servo" : "buttons4",
            act == ACT_SERVO ? (drivePwm ? "pwm" : "binary") : (modulated ? "mod" : "binary"),
            slotMs, throttleLimit,
-           radioName(radio), viaName(to.via));
+           radioName(radio), viaName(to.via), resetReason(), rampMs);
   sendReply(to, buf);
 }
 
@@ -1131,7 +1185,10 @@ void setup() {
   printSettings();
   Serial.println("UART: command frames (one JSON object per line) are accepted on this port "
                  "at 115200 baud:  run_controller.py --esp serial:<device>");
-  Serial.printf("firmware %s\n", FW_VERSION);
+  Serial.printf("firmware %s, last reset: %s\n", FW_VERSION, resetReason());
+  if (strcmp(resetReason(), "brownout") == 0)
+    Serial.println("WARNING: BROWN-OUT reset: the supply sagged (motor inrush on a shared battery?). "
+                   "Charge the battery, add bulk capacitance at the driver, or power the ESP32 separately");
   if (bleWanted()) {
     Serial.printf("BLE: advertising as %s (%s) -- run_controller.py --esp ble:%s\n",
                   bleName, ble.address().c_str(), bleName);

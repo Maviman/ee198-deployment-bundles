@@ -571,9 +571,10 @@ def ledc(events):
     return out
 
 
-def servo_car(fw):
+def servo_car(fw, ramp_ms=0):
     f = fw()
     f.rx(b"pins 2 1 41 42\n")                 # this car: FWD=GPIO2, BACK=GPIO1
+    f.rx(f"ramp {ramp_ms}\n".encode())        # 0: the drive jumps straight to its level
     ev = f.rx(b"act servo\n")
     return f, ev
 
@@ -653,3 +654,25 @@ def test_act_is_refused_while_driving(fw):
     f, _ = servo_car(fw)
     f.rx(frame(1, (0.5, 0.0)))
     assert any("REFUSED" in line for line in logs(f.rx(b"act buttons\n")))
+
+
+def test_the_drive_soft_starts_and_never_ramps_a_stop(fw):
+    # Full power at once browned the car's ESP32 out (2026-11-13): the level starts at 0.35
+    # and climbs to the target over `ramp` ms; a stop or slow-down is instant.
+    f, _ = servo_car(fw, ramp_ms=400)
+    f.rx(b"drive binary\n")
+    d = ledc(f.rx(frame(1, (1.0, 0.0))))
+    assert d[2] == round(0.35 * 1023), "starts at the soft-start floor, not full power"
+    f.rx(frame(2, (1.0, 0.0)))
+    d = ledc(f.run(200, 10) + f.rx(frame(3, (1.0, 0.0))))
+    assert round(0.6 * 1023) < d[2] < 1023, "half way up the ramp after ~200 ms"
+    f.rx(frame(4, (1.0, 0.0)))
+    d = ledc(f.run(250, 10) + f.rx(frame(5, (1.0, 0.0))))
+    assert d[2] == 1023, "full power once the ramp is done"
+    assert ledc(f.rx(frame(6, (0.0, 0.0))))[2] == 0, "a stop is instant"
+
+
+def test_the_probe_reports_the_reset_reason_and_the_ramp(fw):
+    f, _ = servo_car(fw, ramp_ms=400)
+    info = json.loads(next(e.text for e in f.rx(b'{"probe":1}\n') if e.kind == "TX" and e.text.startswith('{"car"')))
+    assert info["rst"] == "host" and info["ramp_ms"] == 400 and info["act"] == "servo"

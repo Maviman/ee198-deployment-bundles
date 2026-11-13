@@ -632,7 +632,7 @@ def report_agreement(rep: Report, scans, corner_ids, mm_detect, mode: str, share
         shared = agreement({sc.slot: sc.H for sc in scans}, views, skip_ids=set(corner_ids))
     if not shared:
         rep.add(WARN if mode == "check" else FAIL, "cameras agree",
-                "no tag (evader, car, spare) is in view of two cameras: nothing to compare")
+                "no floor tag (evader, spare) is in view of two cameras: nothing to compare")
         return
     worst = max(s.spread_m for s in shared)
     level = OK if worst <= AGREE_OK_M else WARN if worst <= AGREE_FAIL_M else FAIL
@@ -716,11 +716,20 @@ def save(args, rep: Report, sc: CamScan, residuals, measured, mm, half, layout, 
 def calibrate_together(args, rep: Report, scans, points, corner_ids, mm, mm_detect, half) -> None:
     from vision.joint_calibration import CameraView, fit_joint
 
+    # Only tags lying ON THE FLOOR may tie the cameras together: the fit is of the floor plane.
+    # A car's tag rides ~9 cm up on its roof (triangulated 2026-11-12), and two cameras
+    # looking from opposite corners each push a raised tag away from themselves, so they put
+    # it 20-40 cm apart. The fleet's cars are left out; the evader and spares are paper on
+    # the floor during a scan.
+    floor_ids = [m for m in mm_detect.all_ids if m not in mm.pursuer_ids]
+    left_out = sorted(m for m in mm.pursuer_ids if sum(m in sc.seen for sc in scans) > 1)
+    if left_out:
+        print(f"        car tag(s) {left_out} left out of the fit: on a roof, above the floor it is fitted to")
     views = []
     for sc in scans:
         und = {c: marker_math.undistort_points(np.asarray(sc.centers[c]).reshape(1, 2), sc.K, sc.D)[0]
                for c in sc.centers}
-        views.append(CameraView(sc.slot, und, _tag_views(sc, mm_detect.all_ids, mm_detect)))
+        views.append(CameraView(sc.slot, und, _tag_views(sc, floor_ids, mm_detect)))
     for sc in scans:
         print(f"        camera {sc.slot}: corner tags {sorted(sc.centers)}, "
               f"tags {sorted(t for t in views[scans.index(sc)].tags)}")
@@ -742,8 +751,8 @@ def calibrate_together(args, rep: Report, scans, points, corner_ids, mm, mm_dete
             level = OK if pin <= PIN_OK_M else WARN if pin <= PIN_FAIL_M else FAIL
             rep.add(level, f"{sc.label}fit", f"the shared tags pin this camera to +-{100 * pin:.1f} cm (1 sigma, "
                     "worst point of the arena)"
-                    + ("" if level == OK else ": put a tag both cameras see in each half of the arena, "
-                       "away from the diagonal between the side corners"))
+                    + ("" if level == OK else ": add floor tags (paper, not on a car) that both cameras see, "
+                       "spread along the band both see (from near one side corner tag to near the other)"))
         else:
             rep.add(OK, f"{sc.label}corners", f"sees all of {', '.join(map(str, cf.seen))}")
     report_agreement(rep, scans, corner_ids, mm_detect, mode="fit", shared=fit.shared)
@@ -756,8 +765,8 @@ def calibrate_together(args, rep: Report, scans, points, corner_ids, mm, mm_dete
                 + ", ".join(f"{100 * s.loo_m:.1f} cm (tag {s.tag_id})" for s in loo)
                 + ("" if level == OK else ": the cameras do not agree away from the tags that fixed them"))
     elif fit.free_params:
-        rep.add(WARN, "cross-check", f"only {len(fit.shared)} tag(s) in view of both cameras: the fit used them "
-                "all, so nothing checks it. Put one more (a spare tag 2 or 3, or a car) where both cameras see it")
+        rep.add(WARN, "cross-check", f"only {len(fit.shared)} floor tag(s) in view of both cameras: the fit used "
+                "them all, so nothing checks it. Lay one more (a spare tag, flat on the floor) where both cameras see it")
     if fit.rms is not None and fit.rms > 3.0:
         rep.add(WARN, "fit residual", f"{fit.rms:.1f}x the scatter tag noise explains: a tag or camera moved "
                 "during the scan, or a lens is not corrected")

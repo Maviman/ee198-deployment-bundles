@@ -178,12 +178,21 @@ def test_camera_settings_follow_the_camera_not_the_slot(tmp_path):
 
 def test_two_corner_camera_scan_end_to_end(tmp_path, capsys):
     """The real `arena scan` on rendered frames: two corner cameras, the X1-like one with
-    strong barrel distortion, parked tags. Both calibrations must be right everywhere."""
+    strong barrel distortion, parked tags. The cameras map ONE arena: where a tag is near
+    one camera and far from the other, the near one decides (fusion weights tag px^2). So:
+    each camera must be right where it is the bigger view, and the fused pose everywhere."""
+    import cv2
+
+    # one car (as `arena scan` passes the fleet): its tag rides a roof and is left out; the
+    # spares 2 / 3 and the evader lie on the floor and tie the cameras together
     rc = scan_arena.main(["--synthetic", "--camera", "a", "--camera", "b", "--out-dir", str(tmp_path),
-                          "--frames", "20"])
+                          "--frames", "20", "--pursuers", "1"])
     out = capsys.readouterr().out
     assert rc == 0, out
     assert "cameras agree" in out and "cross-check" in out
+    assert "car tag(s) [1] left out of the fit" in out
+    grid = np.array(GRID)
+    est, size = {}, {}
     for slot, kw in scan_arena.SYNTHETIC_CORNER_CAMS.items():
         cal = yaml.safe_load((tmp_path / ("synthetic_homography.yaml" if slot == 0
                                           else f"synthetic_homography.{slot}.yaml")).read_text())
@@ -191,16 +200,30 @@ def test_two_corner_camera_scan_end_to_end(tmp_path, capsys):
         K = np.asarray(info["camera_matrix"]["data"]).reshape(3, 3)
         D = np.asarray(info["distortion_coefficients"]["data"])
         assert D[0] == pytest.approx(kw["k1"], abs=0.04)
-        # ground truth: where the arena point really appears (pinhole + the true lens)
-        Ktrue = nominal_K((1280, 720))
-        px, _ = project(np.linalg.inv(TRUTH[slot]), GRID)
-        norm = np.hstack([px, np.ones((len(px), 1))]) @ np.linalg.inv(Ktrue).T
-        import cv2
-        raw, _ = cv2.projectPoints(norm.reshape(-1, 1, 3), np.zeros(3), np.zeros(3), Ktrue,
-                                   np.array([kw["k1"], 0, 0, 0, 0.0]))
-        raw = raw.reshape(-1, 2)
+        # ground truth: where each arena point (and a 7 cm tag there) really appears
+        Kt = nominal_K((1280, 720))
+
+        def raw_px(pts, k1=kw["k1"], H=TRUTH[slot]):
+            px, _ = project(np.linalg.inv(H), pts)
+            norm = np.hstack([px, np.ones((len(px), 1))]) @ np.linalg.inv(Kt).T
+            r, _ = cv2.projectPoints(norm.reshape(-1, 1, 3), np.zeros(3), np.zeros(3), Kt,
+                                     np.array([k1, 0, 0, 0, 0.0]))
+            return r.reshape(-1, 2)
+        raw = raw_px(grid)
         inside = (raw[:, 0] >= 0) & (raw[:, 0] < 1280) & (raw[:, 1] >= 0) & (raw[:, 1] < 720)
         got = arena_frame.project_px_to_arena(np.asarray(cal["homography"]),
-                                              marker_math.undistort_points(raw[inside], K, D))
-        err = np.linalg.norm(got - np.array(GRID)[inside], axis=1)
-        assert err.max() < 0.04, (slot, err.max())
+                                              marker_math.undistort_points(raw, K, D))
+        est[slot] = np.where(inside[:, None], got, np.nan)
+        sides = [np.mean(np.linalg.norm(np.diff(raw_px(tag_corners_arena(x, y, 0.0, 0.07)),
+                                                axis=0, append=raw_px(tag_corners_arena(x, y, 0.0, 0.07))[:1]),
+                                        axis=1)) for x, y in grid]
+        size[slot] = np.where(inside, sides, 0.0)
+    for slot in est:
+        other = 1 - slot
+        mine = size[slot] >= size[other]                       # this camera is the bigger view
+        err = np.linalg.norm(est[slot][mine] - grid[mine], axis=1)
+        assert np.nanmax(err) < 0.03, (slot, np.nanmax(err))
+    w = {s: size[s] ** 2 for s in est}
+    fused = sum(np.nan_to_num(est[s]) * w[s][:, None] for s in est) / (w[0] + w[1])[:, None]
+    err = np.linalg.norm(fused - grid, axis=1)
+    assert err.max() < 0.03, err.max()

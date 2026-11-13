@@ -67,11 +67,14 @@ the far corner is past the top of the frame, and that is fine. `arena scan`
 
 1. **Aim:** each camera's own corner tag fully in frame with a margin at the
    bottom, both side tags in frame. Mark the mounts so they can be replaced.
-2. **Shared tags:** at least two tags BOTH cameras see, one in each half of the
-   arena (the halves are split by the line from tag 11 to tag 13), away from that
-   line: the evader and a car, or the spare tags 2 / 3. A third gives the fit a
-   check it did not use (the `cross-check` line). Nothing may move during the scan:
-   the cameras are captured one after the other.
+2. **Shared tags:** at least two tags BOTH cameras see, lying FLAT ON THE FLOOR
+   (the evader on its paper sheet, the spare tags 2 / 3): never a car, whose tag rides
+   ~9 cm up and is pushed away from each camera in opposite directions. Both cameras
+   see only a band along the line from tag 11 to tag 13 (the C270 sees ~25 cm past
+   it), so spread the tags ALONG that band: one toward the tag-11 end, one toward
+   the tag-13 end, one near the middle. Three pin each camera to ~1.3 cm and give a
+   check the fit did not use (the `cross-check` line). Nothing may move during the
+   scan: the cameras are captured one after the other.
 3. **Lens:** each camera's lens distortion is measured from the boundary tape
    between its corner tags (`lens` line; the X1 bends straight tape by ~4 px) and
    saved to `config/camera_info.<k>.yaml`. It is kept for later scans of that same

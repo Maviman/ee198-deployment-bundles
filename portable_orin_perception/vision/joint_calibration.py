@@ -18,11 +18,11 @@ camera that sees a tag up close decides where it is. A camera that sees all four
 keeps its own homography and anchors the others.
 
 How many shared tags: each point both cameras see gives two equations and each
-three-corner camera has two unknowns, so the evader and one car are enough when they sit
-one in each half of the arena (a tag deep in camera A's half is where A is sure and B is
-not, so it pins B's far corner, and the other way round). A tag ON the diagonal between
-the two side corners helps neither camera much. A third shared tag gives the fit a check
-it did not use (``leave_one_out``): the honest answer to "do the two cameras agree?".
+three-corner camera has two unknowns, so two tags are the minimum; three, spread along
+the band both cameras see, pin each camera to ~1.3 cm on the real rig (2026-11-12) and
+give the fit a check it did not use (``leave_one_out``): the honest answer to "do the
+two cameras agree?". The tags must lie ON THE FLOOR: the fit is of the floor plane, and a
+car's roof tag (~9 cm up) is pushed away from each camera, in opposite directions.
 """
 
 from __future__ import annotations
@@ -334,8 +334,8 @@ def fit_joint(views: list, points: dict, *, half: tuple[float, float],
         non_corner = [t for t in by_tag if len(by_tag[t]) >= 2 and t not in corner_ids]
         if not non_corner:
             return JointFit(cams, [], n_params, n_eq,
-                            error="no tag is in view of two cameras: put the evader, a car or a spare tag "
-                                  "where both cameras see it (one in each half of the arena)")
+                            error="no floor tag is in view of two cameras: lay the evader or a spare tag "
+                                  "flat where both cameras see it (the band between the side corner tags)")
         if _start is not None:
             starts = [np.asarray(_start, dtype=np.float64)]
         else:
@@ -378,8 +378,8 @@ def fit_joint(views: list, points: dict, *, half: tuple[float, float],
         A = J.T @ J if J is not None else None
         if A is None or np.linalg.cond(A) > 1e14:
             return JointFit(cams, [], n_params, n_eq, rms,
-                            error="the tags both cameras see do not pin each camera's missing corner: put one "
-                                  "in each half of the arena, away from the diagonal between the side corners")
+                            error="the tags both cameras see do not pin each camera's missing corner: lay more "
+                                  "floor tags where both see them, spread out along that band")
         cov = np.linalg.inv(A) * (max(1.0, rms ** 2) if rms is not None else 1.0)
         hw, hh = half
         grid = [(x * hw * 0.95, y * hh * 0.95) for x in np.linspace(-1, 1, 5) for y in np.linspace(-1, 1, 5)]

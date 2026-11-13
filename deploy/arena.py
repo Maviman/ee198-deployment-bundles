@@ -797,6 +797,12 @@ sleep 0.5; sudo -n renice -n -10 -p $(pgrep -f "^python3 -u run_vision.py") >/de
         if vis.get("fps", 0) > 0 and ctl.get("state") == "RUNNING":
             healthy = True
             break
+        # Every service up, but no complete pose frame yet: a car or the evader is out of
+        # view, or the car is off. That is the operator's next step, not a start-up failure
+        # (it made every CALIBRATE end "NEEDS ATTENTION"), so wait a little, then report it.
+        if vis.get("fps", 0) > 0 and ctl.get("state") == "STALLED" and time.time() > deadline - args.wait / 2:
+            healthy = True
+            break
         time.sleep(1.0)
     if not healthy:
         bad("pipeline not healthy yet. What each service says:")
@@ -806,6 +812,9 @@ sleep 0.5; sudo -n renice -n -10 -p $(pgrep -f "^python3 -u run_vision.py") >/de
         print("Fix, then `arena stop` and `arena up` again. Alerts: `arena status`.")
         raise SystemExit(1)
     lat = ((ctl.get("lat_ms") or {}).get("total") or {})
+    if ctl.get("state") == "STALLED":
+        warn("every service is up, but no pose frames yet: the car and the evader must both be in "
+             "view (and the car powered on). The dashboard's 'Ready to start?' says which is missing.")
     ok(f"camera {vis.get('mode')} at {vis.get('fps')} fps; cars: "
        + ", ".join(f"{x['idx']}@{x['addr']}" for x in ctl.get("cars", [])))
     if lat:

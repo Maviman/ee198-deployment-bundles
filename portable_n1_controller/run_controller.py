@@ -170,6 +170,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--model", default="models/n1_catch", help="model dir (models/n1_catch or models/n1_pin)")
     parser.add_argument("--source", choices=["sim", "udp"], default="sim")
+    parser.add_argument("--require-cars", action="store_true",
+                        help="exit at start-up if a serial / BLE car does not verify in time "
+                             "(default: start anyway and keep retrying it)")
     parser.add_argument("--esp", default=None,
                         help="ESP32 address as ip:port, or a comma-separated list in "
                              "CAR_INDEX order for a fleet "
@@ -285,16 +288,25 @@ def main() -> None:
         try:
             link = EspLink(targets, log=lambda m: print(
                 f"[control {time.strftime('%H:%M:%S')}] {m}", flush=True))
-            for i, target in enumerate(targets):
-                print(f"  car index {i} (cmd[{i}]) -> {target_uri(target)}")
-            # Serial boards must prove which CAR_INDEX they are before anything
-            # is driven (no-op for UDP): the wrong port order means the wrong
-            # physical car obeys each command.
+        except SerialLinkError as exc:          # a configuration error: wrong port, no pyserial/bleak
+            raise SystemExit(f"serial link: {exc}")
+        for i, target in enumerate(targets):
+            print(f"  car index {i} (cmd[{i}]) -> {target_uri(target)}")
+        # Serial / BLE boards must prove which CAR_INDEX they are before anything is
+        # driven (no-op for UDP): the wrong port order means the wrong physical car
+        # obeys each command. A board that is simply OFF is not a reason to quit: the
+        # endpoint keeps retrying and goes up the moment the car answers its probe, and
+        # until then nothing is sent to it (write() needs a verified link) and the
+        # dashboard's START stays refused ("every car link is answering"). Quitting made
+        # every `arena up` / CALIBRATE fail whenever the car was off (2026-11-13).
+        try:
             link.wait_ready()
         except SerialLinkError as exc:
-            if link is not None:
+            if args.require_cars:
                 link.close()
-            raise SystemExit(f"serial link: {exc}")
+                raise SystemExit(f"serial link: {exc}")
+            print(f"[control {time.strftime('%H:%M:%S')}] car link not up yet ({exc}); "
+                  "starting anyway and retrying: power the car on, it connects by itself", flush=True)
     else:
         print("no --esp given: dry run, commands printed only")
 

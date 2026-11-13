@@ -593,7 +593,9 @@ void scopePin(const char *label, int pin, unsigned long ms, bool servo) {
   Serial.printf("  %-6s GPIO%-2d %5.1f%% high, %4lu rising edges in %lu ms (~%.0f Hz)", label, pin,
                 duty, (unsigned long)edges, ms, hz);
   if (servo && edges) Serial.printf("  pulse ~%.0f us", duty / 100.0 * 1e6 / hz);
-  if (!edges) Serial.print(duty > 50 ? "  STUCK HIGH" : "  no pulses");
+  // A drive pad held high is binary drive working (full on), not a fault.
+  bool fullOnExpected = !servo && !drivePwm && duty > 50;
+  if (!edges) Serial.print(fullOnExpected ? "  full on (drive binary)" : duty > 50 ? "  STUCK HIGH" : "  no pulses");
   Serial.println();
 }
 #endif

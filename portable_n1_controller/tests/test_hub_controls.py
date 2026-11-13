@@ -514,3 +514,26 @@ def test_flash_car_is_refused_while_armed_and_to_strangers(rig, tmp_path, monkey
     r.post("/api/stop")
     monkeypatch.setattr(hubmod, "is_local", lambda addr: False)
     assert r.post("/api/flash")[0] == 403
+
+
+def test_a_python_steps_output_shows_while_it_runs_not_only_at_the_end(rig, tmp_path):
+    # arena.py, PlatformIO and esptool are Python: piped, they buffered everything and every
+    # long job (CALIBRATE, FLASH CAR) looked frozen on the page until it ended (2026-11-13).
+    cli = tmp_path / "arena"
+    cli.write_text("#!/usr/bin/env python3\nimport time\nprint('step one done')\ntime.sleep(2.0)\nprint('end')\n")
+    cli.chmod(0o755)
+    r = rig(arena_cli=str(cli))
+    assert r.post("/api/init")[0] == 200
+    time.sleep(1.0)
+    job = r.state()["init"]
+    assert job["running"] and "step one done" in job["lines"], job["lines"]
+    assert job["step"] == "arena up" and job["step_started"]
+    assert wait_job(r)["lines"][-1] == "end"
+
+
+def test_a_silent_step_still_gets_killed_at_its_time_limit(rig, tmp_path, monkeypatch):
+    monkeypatch.setitem(hubmod.Hub.JOBS, "init", ("INITIALIZE", [("up", 1, False)]))
+    r = rig(arena_cli=script(tmp_path, "sleep 30\n"))
+    assert r.post("/api/init")[0] == 200
+    job = wait_job(r, limit=8.0)
+    assert job["ok"] is False and "took longer than 1 s" in job["lines"][-1]

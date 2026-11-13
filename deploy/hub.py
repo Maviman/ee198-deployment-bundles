@@ -56,6 +56,7 @@ import math
 import os
 import re
 import shlex
+import signal
 import socket
 import subprocess
 import threading
@@ -166,7 +167,8 @@ class Hub:
         # time, since both take the camera; "kind" says which is in the slot
         self.init_lock = threading.Lock()
         self.init_job = {"kind": None, "running": False, "started": None, "finished": None, "ok": None,
-                         "rc": None, "lines": [], "summary": [], "args": []}
+                         "rc": None, "lines": [], "summary": [], "args": [],
+                         "step": None, "step_started": None}
         # the dashboard's fleet menu: `arena fleet --json` (current model, car count, installed
         # models), refreshed in the background and after every job
         self.fleet: dict = {}
@@ -561,23 +563,44 @@ class Hub:
             sub = sub.format(args=shlex.join(self.init_job.get("args") or []))
             if i:
                 lines.append(f"--- arena {sub} ---")
-            rc, deadline, key = None, time.time() + limit, []
+            rc, key = None, []
+            self.init_job.update(step=f"arena {sub}", step_started=time.time())
             try:
-                # stdin closed: `arena scan` uses `ssh -t`, which must never wait for a keyboard
+                # stdin closed: `arena scan` uses `ssh -t`, which must never wait for a keyboard.
+                # PYTHONUNBUFFERED: arena.py, PlatformIO and esptool are Python, and a Python
+                # writing to a pipe holds its output in an 8 KB buffer, so the page showed
+                # nothing for a minute and more and every long job looked frozen (2026-11-13).
+                # text mode reads '\r' as a line end too, so upload progress shows as it goes.
                 p = subprocess.Popen([cli] + shlex.split(sub), cwd=os.path.dirname(os.path.abspath(cli)) or None,
                                      stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                     stderr=subprocess.STDOUT, text=True, errors="replace")
+                                     stderr=subprocess.STDOUT, text=True, errors="replace",
+                                     env=dict(os.environ, PYTHONUNBUFFERED="1"), start_new_session=True)
+                # The time limit holds even for a step that prints nothing at all, and kills the
+                # step's whole process group: a child it started (ssh, pio, esptool) would keep
+                # the output pipe open and hang the job after the parent alone was killed.
+                killed = threading.Event()
+
+                def overdue(p=p, killed=killed):
+                    killed.set()
+                    try:
+                        os.killpg(p.pid, signal.SIGKILL)
+                    except OSError:
+                        p.kill()
+                watchdog = threading.Timer(limit, overdue)
+                watchdog.daemon = True
+                watchdog.start()
                 for line in p.stdout:
                     line = ANSI.sub("", line).rstrip()
                     if line and not line.startswith("Pseudo-terminal will not be allocated"):
                         lines.append(line[:200])
                         del lines[:-80]
-                        if line.lstrip().startswith(("[FAIL]", "[WARN]")) or "giving up" in line:
+                        if (line.lstrip().startswith(("[FAIL]", "[WARN]")) or "giving up" in line
+                                or "board answers" in line or "flash FAILED" in line
+                                or "port is busy" in line or "no ESP32 on" in line):
                             key.append(line.strip()[:200])
-                    if time.time() > deadline:
-                        p.kill()
-                        lines.append(f"(killed: arena {sub} took longer than {limit} s)")
-                        break
+                watchdog.cancel()
+                if killed.is_set():
+                    lines.append(f"(killed: arena {sub} took longer than {limit} s)")
                 rc = p.wait(timeout=10)
             except (OSError, subprocess.SubprocessError) as exc:
                 lines.append(f"could not run {cli}: {exc}")
@@ -587,7 +610,7 @@ class Hub:
             if rc != 0 and first_bad == 0:
                 first_bad = rc
         rc = first_bad
-        self.init_job.update(running=False, finished=time.time(), rc=rc, ok=(rc == 0))
+        self.init_job.update(running=False, finished=time.time(), rc=rc, ok=(rc == 0), step=None)
         self.event(f"{label} finished: " + ("ok" if rc == 0 else f"needs attention (exit {rc})"))
         self.refresh_fleet()
 

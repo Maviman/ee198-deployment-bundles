@@ -39,6 +39,8 @@ never slow a pose frame or a command.
     POST /api/fleet        APPLY in the fleet menu, same rules as /api/init: body
                            {"pursuers": N, "model": "models/<name>"} runs `arena fleet
                            --pursuers N --model M`, then `arena up --restart`.
+    POST /api/flash        FLASH CAR, same rules as /api/init: `<--arena-cli> flash --usb`
+                           (the one ESP32 on this Orin's USB), then `arena up`.
     POST /api/scan         CALIBRATE, same rules as /api/init: `<--arena-cli> scan
                            --tune-exposure` (the shortest exposure the light allows,
                            so a moving car's tag does not smear; then the corner fit) (it
@@ -80,6 +82,15 @@ READY_VIS_PCT = 90.0         # a tag must be seen in this share of recent frames
 START_MARGIN_M = 0.065       # the car must start this far inside the arena edge
 EDGE_FACING_M = 0.70         # beyond this radius the car must face inward to arm
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def usb_esp_ports() -> list[str]:
+    """ESP32 boards on this machine's USB (same globs as deploy/arena.py)."""
+    d = Path("/dev/serial/by-id")
+    if not d.is_dir():
+        return []
+    globs = ("usb-Silicon_Labs_CP210*", "usb-Espressif*", "usb-1a86_*", "usb-FTDI_*")
+    return sorted(str(p) for g in globs for p in d.glob(g))
 
 
 def find_arena_cli() -> str:
@@ -317,6 +328,7 @@ class Hub:
                 # the START / INITIALIZE buttons: who may press them, and whether they would work
                 "can_control": bool(client_local),
                 "can_init": bool(getattr(self.args, "arena_cli", "")),
+                "usb_esp": [Path(p).name for p in usb_esp_ports()],
                 "ready": ready, "run": run, "init": dict(self.init_job, lines=self.init_job["lines"][-14:]),
                 "fleet": self.fleet,
                 "scan_png": (lambda q: q.stat().st_mtime if q else None)(self.scan_png()),
@@ -463,6 +475,14 @@ class Hub:
         """INITIALIZE: `<arena-cli> up`. Starts what is not running, leaves the cars DISARMED."""
         return self._start_job("init")
 
+    def flash(self) -> tuple[int, dict]:
+        """FLASH CAR: `<arena-cli> flash --usb` (build the firmware, flash the one ESP32 on this
+        Orin's USB, read back what it boots), then `<arena-cli> up`. Refused while armed (the
+        car reboots); the board's saved settings survive."""
+        if not usb_esp_ports():
+            return 409, {"error": "no ESP32 on this Orin's USB: plug the car's UART port in and power it"}
+        return self._start_job("flash")
+
     def calibrate(self) -> tuple[int, dict]:
         """CALIBRATE: `<arena-cli> scan` (disarms, stops the camera service, re-fits the arena
         frame on the vision Orin), then `<arena-cli> up` to bring the camera service back. Also
@@ -507,6 +527,9 @@ class Hub:
     # "{args}" takes the arguments the request supplied (set_fleet)
     JOBS = {"init": ("INITIALIZE", [("up", 150, False)]),
             "scan": ("CALIBRATE", [("scan --tune-exposure", 200, False), ("up", 150, True)]),
+            # build ~50 s + upload ~90 s at 115200 baud; `up` afterwards restarts a controller
+            # the flash had to stop (a car on the cable), and is a no-op otherwise
+            "flash": ("FLASH CAR", [("flash --usb", 420, False), ("up", 150, True)]),
             "fleet": ("APPLY", [("fleet {args}", 30, False), ("up --restart", 150, False)])}
 
     def _start_job(self, kind: str, extra: list[str] | None = None) -> tuple[int, dict]:
@@ -743,7 +766,7 @@ def make_handler(hub: Hub):
         def do_POST(self):
             if self.path.startswith("/api/stop"):
                 self._json(200, hub.disarm())
-            elif self.path.startswith(("/api/arm", "/api/init", "/api/scan", "/api/fleet")):
+            elif self.path.startswith(("/api/arm", "/api/init", "/api/scan", "/api/fleet", "/api/flash")):
                 why = self._may_control()
                 if why:
                     self._json(403, {"error": why})
@@ -753,6 +776,8 @@ def make_handler(hub: Hub):
                     self._json(*hub.calibrate())
                 elif self.path.startswith("/api/fleet"):
                     self._json(*hub.set_fleet(self._body()))
+                elif self.path.startswith("/api/flash"):
+                    self._json(*hub.flash())
                 else:
                     self._json(*hub.initialize())
             else:

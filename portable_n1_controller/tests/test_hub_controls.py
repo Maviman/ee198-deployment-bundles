@@ -484,3 +484,33 @@ def test_a_feed_is_relayed_with_each_frames_own_tags(rig):
     with pytest.raises(urllib.error.HTTPError) as e:
         urllib.request.urlopen(r.base + "/feed/1.mjpg", timeout=5)
     assert e.value.code == 404
+
+
+# ------------------------------------------------------------- FLASH CAR (2026-11-13) ----
+def test_flash_car_flashes_the_usb_board_then_brings_the_services_back(rig, tmp_path, monkeypatch):
+    monkeypatch.setattr(hubmod, "usb_esp_ports", lambda: ["/dev/serial/by-id/usb-Silicon_Labs_CP2102N_x-if00-port0"])
+    r = rig(arena_cli=script(tmp_path, 'echo "arena $*"; exit 0\n'))
+    assert r.state()["usb_esp"] == ["usb-Silicon_Labs_CP2102N_x-if00-port0"], "the page shows which board"
+    assert r.post("/api/flash") == (200, {"started": True})
+    job = wait_job(r)
+    assert job["kind"] == "flash" and job["ok"] is True
+    assert job["lines"] == ["arena flash --usb", "--- arena up ---", "arena up"]
+
+
+def test_flash_car_needs_a_board_on_usb(rig, tmp_path, monkeypatch):
+    monkeypatch.setattr(hubmod, "usb_esp_ports", lambda: [])
+    r = rig(arena_cli=script(tmp_path, 'echo "arena $*"; exit 0\n'))
+    code, body = r.post("/api/flash")
+    assert code == 409 and "USB" in body["error"]
+    assert r.state()["init"]["started"] is None, "nothing ran"
+
+
+def test_flash_car_is_refused_while_armed_and_to_strangers(rig, tmp_path, monkeypatch):
+    monkeypatch.setattr(hubmod, "usb_esp_ports", lambda: ["/dev/serial/by-id/usb-Espressif_x"])
+    r = rig(arena_cli=script(tmp_path, 'echo "arena $*"; exit 0\n'))
+    assert r.post("/api/arm")[0] == 200
+    time.sleep(0.3)
+    assert r.post("/api/flash")[0] == 409, "the car reboots: never while it drives"
+    r.post("/api/stop")
+    monkeypatch.setattr(hubmod, "is_local", lambda addr: False)
+    assert r.post("/api/flash")[0] == 403

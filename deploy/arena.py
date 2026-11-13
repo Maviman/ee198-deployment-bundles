@@ -630,6 +630,92 @@ def _find_pio() -> str | None:
     return None
 
 
+USB_ESP_GLOBS = ("usb-Silicon_Labs_CP210*", "usb-Espressif*", "usb-1a86_*", "usb-FTDI_*")
+
+
+def usb_esp_ports() -> list[str]:
+    """The ESP32 boards on this machine's USB, by their stable /dev/serial/by-id names."""
+    d = Path("/dev/serial/by-id")
+    if not d.is_dir():
+        return []
+    return sorted(str(p) for g in USB_ESP_GLOBS for p in d.glob(g))
+
+
+PROBE_PY = r'''
+import json, sys, time, serial
+s = serial.Serial(sys.argv[1], 115200, timeout=0.3)      # pyserial defaults: does not reset the board
+time.sleep(0.3); s.reset_input_buffer()
+s.write(b'{"probe":1}\n'); time.sleep(0.8)
+for line in s.read(8192).decode(errors="replace").splitlines():
+    if line.startswith('{"car"'):
+        print(line); break
+s.write(b"act\n"); time.sleep(0.6)
+print(s.read(8192).decode(errors="replace").strip())
+'''
+
+
+def flash_usb(args, cfg: Config, pio: str, proj: Path) -> None:
+    """Flash the one car on this machine's USB, safely: disarm, free the port (stop the
+    controller if it drives the car over this cable; refuse if anything else holds it),
+    flash, then read back what the board boots. Its NVS settings (index, pins, act,
+    drive, servo, radio) survive a flash."""
+    port = args.usb
+    if not port:
+        ports = usb_esp_ports()
+        if not ports:
+            die("no ESP32 on this machine's USB (nothing under /dev/serial/by-id). Plug the car's "
+                "UART port in and power the car, then try again")
+        if len(ports) > 1:
+            die("more than one ESP32 on USB: " + ", ".join(ports) + ". Unplug all but the one to "
+                "flash, or name it: arena flash --usb <port>")
+        port = ports[0]
+    real = os.path.realpath(port)
+    step(f"flashing the car on {port}")
+    try:
+        _ctl(cfg, "disarm")
+    except SystemExit:
+        pass
+    if any(os.path.realpath(t.split("@")[0][len("serial:"):]) == real
+           for t in cfg.esp.split(",") if t.strip().startswith("serial:")):
+        ok("the controller drives this car over the cable: stopping it for the flash "
+           "(`arena up` starts it again)")
+        run_on(cfg.control, "svc_stop controller", lib=True, timeout=30)
+    holders = subprocess.run(["fuser", real], capture_output=True, text=True).stdout.split()
+    if holders:
+        who = []
+        for pid in holders:
+            try:
+                who.append(f"pid {pid}: " + Path(f"/proc/{pid}/cmdline").read_text().replace("\0", " ")[:80])
+            except OSError:
+                who.append(f"pid {pid}")
+        die("the port is busy (a serial monitor?): " + "; ".join(who) + ". Close it and try again")
+    cmd = [pio, "run", "-d", str(proj), "-t", "upload", "--upload-port", port]
+    if subprocess.run(cmd, stdin=subprocess.DEVNULL).returncode != 0:
+        die("flash FAILED. Common causes: the car lost power or the cable moved mid-flash (the "
+            "board then boot-loops with no app: just flash again), or the board needs download "
+            "mode (hold BOOT, tap RESET, release BOOT)")
+    ok("flashed; reading back what the board boots")
+    time.sleep(2.5)
+    py = cfg.control.python if cfg.control.local else "python3"
+    p = subprocess.run([os.path.expanduser(py), "-c", PROBE_PY, port], capture_output=True, text=True,
+                       timeout=20)
+    lines = [ln for ln in p.stdout.splitlines() if ln.strip()]
+    if not lines:
+        warn("the board did not answer a probe after the flash: check the boot log with "
+             "`pio device monitor`")
+        return
+    for ln in lines:
+        if ln.startswith('{"car"'):
+            try:
+                info = json.loads(ln)
+                ok(f"board answers: firmware {info.get('fw')}, car index {info.get('car')}, "
+                   f"actuator {info.get('act')} ({info.get('mode')}), radio {info.get('radio')}")
+                continue
+            except ValueError:
+                pass
+        print(f"        {ln}")
+
+
 def cmd_flash(args, cfg: Config) -> None:
     pio = _find_pio()
     if not pio:
@@ -637,16 +723,23 @@ def cmd_flash(args, cfg: Config) -> None:
     proj = REPO / "portable_n1_controller" / "esp32"
     creds = proj / "esp32_receiver" / "wifi_credentials.h"
     if not creds.exists():
-        die(f"{creds.relative_to(REPO)} missing: copy wifi_credentials.h.example and fill in the WiFi")
+        # The header is gitignored, so a fresh checkout has none. A Bluetooth or UART car
+        # does not need WiFi, so build with placeholders rather than refuse (a car that
+        # does need WiFi keeps the network it was given until someone fills this in).
+        example = creds.with_name("wifi_credentials.h.example")
+        if not example.exists():
+            die(f"{creds.relative_to(REPO)} missing, and no example to start from")
+        shutil.copyfile(example, creds)
+        warn(f"{creds.relative_to(REPO)} was missing: created from the example with PLACEHOLDER WiFi. "
+             "Fine for a Bluetooth / UART car; fill it in for a WiFi car")
     step("building firmware")
-    if subprocess.run([pio, "run", "-d", str(proj)]).returncode != 0:
+    if subprocess.run([pio, "run", "-d", str(proj)], stdin=subprocess.DEVNULL).returncode != 0:
         die("build failed")
     if args.build_only:
         return
     if args.usb is not None:
-        step("flashing over USB (use the port labelled UART)")
-        cmd = [pio, "run", "-d", str(proj), "-t", "upload"] + (["--upload-port", args.usb] if args.usb else [])
-        raise SystemExit(subprocess.run(cmd).returncode)
+        flash_usb(args, cfg, pio, proj)
+        return
     m = re.search(r'^\s*#define\s+OTA_PASSWORD\s+"([^"]*)"', creds.read_text(encoding="utf-8"), re.M)
     if not m:
         die("OTA is off: add  #define OTA_PASSWORD \"...\"  to wifi_credentials.h, flash each car once "

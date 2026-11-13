@@ -99,6 +99,7 @@
     <div class="big" id="tick">&ndash;</div>
   </div>
   <button class="act" id="init" title="Bring the whole system up (arena up): starts whatever is not running; the cars stay DISARMED">INITIALIZE</button>
+  <button class="act" id="flash" title="Build the car firmware and flash the ESP32 plugged into this Orin's USB">FLASH CAR</button>
   <button class="act" id="scan" title="Lock the shortest exposure the light allows (no motion blur on a moving car), re-fit the arena frame from the corner tags (arena scan --tune-exposure), then restart the camera service">CALIBRATE</button>
   <button class="act go" id="start" title="ARM the car: the policy drives. Only from a browser on the control Orin, and only when every check is green">START</button>
   <button class="stop" id="stop" title="E-stop every car now (keeps services running; re-arm with `arena go`)">STOP</button>
@@ -357,9 +358,21 @@ async function post(path, body) {
   try { j = await r.json(); } catch (e) { /* no body */ }
   return { ok: r.ok, j };
 }
+// FLASH CAR asks first, like START: the first click arms the button for 5 s, the second flashes.
+let flashConfirmUntil = 0;
+$("flash").onclick = async () => {
+  if (Date.now() > flashConfirmUntil) { flashConfirmUntil = Date.now() + 5000; if (S) render(); return; }
+  flashConfirmUntil = 0; actionMsg = null;
+  $("init").disabled = $("scan").disabled = $("flash").disabled = true;
+  try {
+    const { ok, j } = await post("/api/flash");
+    if (!ok) actionMsg = "FLASH CAR refused: " + (j.error || "unknown");
+  } catch (e) { actionMsg = "hub unreachable: " + e; }
+  if (S) render();
+};
 for (const [id, path, label] of [["init", "/api/init", "INITIALIZE"], ["scan", "/api/scan", "CALIBRATE"]]) {
   $(id).onclick = async () => {
-    actionMsg = null; $("init").disabled = $("scan").disabled = true;
+    actionMsg = null; $("init").disabled = $("scan").disabled = $("flash").disabled = true;
     try {
       const { ok, j } = await post(path);
       if (!ok) actionMsg = label + " refused: " + (j.error || "unknown");
@@ -550,8 +563,21 @@ function render() {
   $("start").textContent = armedNow ? `ARMED · ${Math.ceil(run.remaining_s ?? 0)} s` : confirming ? "CONFIRM: AREA CLEAR?" : "START";
   $("start").title = !canCtl ? "START only works from a browser on the control Orin itself"
     : !rd.ok ? "not ready: see \"Ready to start?\" below" : "ARM the car: the policy drives. Click twice within 5 s.";
-  const jobLabel = job.kind === "scan" ? "calibrate" : job.kind === "fleet" ? "apply fleet" : "initialize";
+  const jobLabel = job.kind === "scan" ? "calibrate" : job.kind === "fleet" ? "apply fleet"
+    : job.kind === "flash" ? "flash car" : "initialize";
   $("init").disabled = $("scan").disabled = !(canCtl && S.can_init) || armedNow || !!job.running;
+  const usb = S.usb_esp || [], flashConfirming = Date.now() < flashConfirmUntil;
+  $("flash").disabled = !(canCtl && S.can_init) || armedNow || !!job.running || usb.length !== 1;
+  $("flash").classList.toggle("confirm", flashConfirming && !$("flash").disabled);
+  $("flash").textContent = job.running && job.kind === "flash" ? "FLASHING…"
+    : flashConfirming ? "CONFIRM FLASH?" : "FLASH CAR";
+  $("flash").title = !canCtl ? "FLASH CAR only works from a browser on the control Orin itself"
+    : !S.can_init ? "this hub was started without --arena-cli: run ./arena flash --usb in a terminal"
+    : armedNow ? "the car is ARMED: press STOP first"
+    : !usb.length ? "no ESP32 on this Orin's USB: plug the car's UART port in and power the car"
+    : usb.length > 1 ? `more than one ESP32 on USB (${usb.join(", ")}): unplug all but the one to flash`
+    : `Build the firmware and flash the car on ${usb[0]} (about 2.5 min). Click twice within 5 s. `
+      + "The car reboots; its saved settings (index, pins, servo, radio) are kept. Close any serial monitor first.";
   renderFleet();
   $("fleetapply").disabled = !(canCtl && S.can_init) || armedNow || !!job.running || !$("fleetmodel").value;
   $("fleetapply").textContent = job.running && job.kind === "fleet" ? "APPLYING…" : "APPLY";

@@ -126,6 +126,27 @@
  *   SAVED in NVS and survives a reflash, so a board that ever stored one keeps it:
  *   the default below applies only to a board that never did. Check with `mode`.
  *
+ * ACTUATOR `act servo` (2026-11-13: the car with a steering servo). Instead of four
+ * on/off buttons:
+ *   DRIVE  -- the two drive pins (pins FWD, BACK; GPIO1/GPIO2 on this car) are the
+ *     inputs of an H-bridge (DRV8833 IN1/IN2 style): forward = PWM on FWD, BACK low;
+ *     reverse = the opposite; stop = both low (coast). `drive pwm` (default): duty =
+ *     |throttle| x `limit`; `drive binary`: full on while |throttle| >= 1/3. A change
+ *     of direction passes through DRIVE_GAP_MS with both low. 20 kHz, 10-bit LEDC
+ *     (channels 2/3 = LEDC timer 1, never the servo's timer).
+ *   STEER  -- a positional hobby servo on `servo pin` (default GPIO19), 50 Hz, LEDC
+ *     channel 0 (timer 0), 14-bit: the ESP32-S3 LEDC CEILING (asking for 16 makes
+ *     ledcSetup fail and the pin stays silent: measured 2026-08-22). +steer = LEFT =
+ *     `servo` left_us; centre and both ends are set with `servo <centre> <left> <right>`
+ *     (microseconds). Swap left/right there if the wheels turn the wrong way.
+ *     Stopped / failsafe / E-stop: drive both low and the servo held at centre.
+ *   GPIO19 is the S3's native-USB D- pad. This board's console is the UART bridge,
+ *   so native USB is unused; the sketch takes the pad back from the USB PHY before
+ *   driving it. Do not plug the board's "USB" (native) port into anything then.
+ *   `scope` samples the drive and servo pads THEMSELVES (pulse width, duty, rate):
+ *   an ACK's applied=true never proves that a pin moved.
+ *   Switch with `act servo` / `act buttons` (saved in NVS, refused while driving).
+ *
  * SERIAL COMMANDS (115200 baud; also listed by typing anything else). Every
  * command that CHANGES something is refused while the car is being driven:
  * a settings save can stall the chip for tens of ms with a button held down.
@@ -134,7 +155,13 @@
  *   slot [ms]                    show / set the modulation slot (15..200 ms)
  *   limit [0.1..1]               show / set the throttle limit (modulated mode)
  *   pins [fwd back left right]   show / set the four button GPIOs
- *   test                         press FWD, BACK, LEFT, RIGHT in turn (wheels OFF)
+ *   test                         press FWD, BACK, LEFT, RIGHT in turn (wheels OFF);
+ *                                with `act servo`: drive fwd/back at 40%, servo L/C/R
+ *   act [buttons|servo]          show / set the actuator (see ACTUATOR above)
+ *   drive [pwm|binary]           show / set how `act servo` drives the motor
+ *   servo [centre left right]    show / set the servo pulse widths (us)
+ *   servo pin <n>                show / set the servo GPIO (default 19)
+ *   scope                        measure the drive and servo pads (act servo)
  *
  * PIN RULES (ESP32-S3-WROOM-1, DevKitC-1). The setter refuses anything else:
  *   OK:     1 2 4-18 21 39-42 45 46 47 48
@@ -163,6 +190,12 @@
 #include "button_mod.h"   // command -> button presses (shared with esp32/test_host)
 #include "uart_frame.h"   // UART bytes -> command frames / console lines (shared with esp32/test_host)
 #include "ble_link.h"     // Bluetooth LE serial link (stubbed in esp32/test_host)
+#ifdef ARDUINO_ARCH_ESP32
+#include "driver/gpio.h"
+#include "soc/gpio_periph.h"          // GPIO_PIN_MUX_REG[]: input enable for `scope`
+#include "soc/io_mux_reg.h"
+#include "soc/usb_serial_jtag_reg.h"  // USB_SERIAL_JTAG_USB_PAD_ENABLE: GPIO19/20 back from the USB PHY
+#endif
 
 // ---- EDIT THESE ------------------------------------------------------------
 // WiFi credentials live in wifi_credentials.h (gitignored, stays local).
@@ -174,7 +207,7 @@
 #include <ArduinoOTA.h>
 #endif
 
-#define FW_VERSION "2026.10-buttons-uart-ble"
+#define FW_VERSION "2026.11-servo-uart-ble"
 
 const uint16_t UDP_PORT = 8888;
 
@@ -200,6 +233,17 @@ const double DEFAULT_THROTTLE_LIMIT = 0.6;   // MODULATED mode only: max press f
 // that never saved one gets this.
 enum Radio { RADIO_WIFI = 0, RADIO_BLE = 1, RADIO_BOTH = 2 };
 const Radio DEFAULT_RADIO = RADIO_WIFI;
+// Actuator (serial `act`, see ACTUATOR above). A board that never saved one gets this;
+// -D DEFAULT_ACT=1 builds a servo car by default.
+enum Act { ACT_BUTTONS = 0, ACT_SERVO = 1 };
+#ifndef DEFAULT_ACT
+#define DEFAULT_ACT ACT_BUTTONS
+#endif
+const int DEFAULT_SERVO_PIN = 19;
+const int DEFAULT_SERVO_CENTER_US = 1500;
+const int DEFAULT_SERVO_LEFT_US = 1800;      // +steer
+const int DEFAULT_SERVO_RIGHT_US = 1200;     // -steer
+const bool DEFAULT_DRIVE_PWM = true;
 // Deadband, full-on, binary threshold and the reversing gap: see button_mod.h.
 // ----------------------------------------------------------------------------
 
@@ -222,6 +266,26 @@ int slotMs = DEFAULT_SLOT_MS;
 double throttleLimit = DEFAULT_THROTTLE_LIMIT;
 int pins[4] = {DEFAULT_PINS[0], DEFAULT_PINS[1], DEFAULT_PINS[2], DEFAULT_PINS[3]};
 const char *PIN_NAMES[4] = {"FWD", "BACK", "LEFT", "RIGHT"};
+
+// `act servo`: H-bridge drive PWM on pins[0]/pins[1], positional servo on servoPin.
+Act act = (Act)DEFAULT_ACT;
+bool drivePwm = DEFAULT_DRIVE_PWM;
+int servoPin = DEFAULT_SERVO_PIN;
+int servoCenterUs = DEFAULT_SERVO_CENTER_US, servoLeftUs = DEFAULT_SERVO_LEFT_US,
+    servoRightUs = DEFAULT_SERVO_RIGHT_US;
+const int SERVO_LEDC_CH = 0;           // LEDC timer 0
+const int SERVO_LEDC_FREQ_HZ = 50;
+const int SERVO_LEDC_BITS = 14;        // ESP32-S3 ceiling: 16 fails at runtime, silently
+const uint32_t SERVO_FRAME_US = 1000000UL / SERVO_LEDC_FREQ_HZ;
+const int DRIVE_LEDC_CH[2] = {2, 3};   // LEDC timer 1: never the servo's timer
+const int DRIVE_LEDC_FREQ_HZ = 20000;  // above hearing; a DRV8833 switches far faster
+const int DRIVE_LEDC_BITS = 10;
+const unsigned long DRIVE_GAP_MS = 40; // both low between forward and reverse
+bool actAttached = false;              // LEDC channels set up and pins attached
+bool servoLedcOk = false, driveLedcOk = false;
+double driveCmd = 0.0, steerCmd = 0.0;
+int driveDir = 0;                      // direction last driven: +1, -1, 0
+unsigned long driveGapUntil = 0;
 
 // One axis = two opposite buttons: throttle = FWD (0) / BACK (1), steer =
 // LEFT (2) / RIGHT (3), as indices into pins[].
@@ -282,10 +346,128 @@ void configurePins() {
   }
 }
 
+// ------------------------------------------------------------------ servo car
+bool servoPinAllowed(int p) {
+  // The button pins, plus 19/20: native USB, unused (the console is the UART bridge).
+  return pinAllowed(p) || p == 19 || p == 20;
+}
+
+int servoUsFor(double steer) {
+  double u = btnmod::clampCmd(steer);
+  if (fabs(u) < 0.02) return servoCenterUs;
+  return (int)lround(servoCenterUs + (u > 0 ? u * (servoLeftUs - servoCenterUs)
+                                            : -u * (servoRightUs - servoCenterUs)));
+}
+
+void servoWriteUs(int us) {
+  int lo = servoLeftUs < servoRightUs ? servoLeftUs : servoRightUs;
+  int hi = servoLeftUs < servoRightUs ? servoRightUs : servoLeftUs;
+  if (us < lo) us = lo;
+  if (us > hi) us = hi;
+  ledcWrite(SERVO_LEDC_CH, ((uint32_t)us << SERVO_LEDC_BITS) / SERVO_FRAME_US);
+}
+
+void driveOut(int dir, double m) {
+  uint32_t full = (1u << DRIVE_LEDC_BITS) - 1;
+  if (m < 0) m = 0;
+  if (m > 1) m = 1;
+  uint32_t duty = (uint32_t)lround(m * full);
+  ledcWrite(DRIVE_LEDC_CH[0], dir > 0 ? duty : 0);
+  ledcWrite(DRIVE_LEDC_CH[1], dir < 0 ? duty : 0);
+}
+
+// Every loop() while driving: the drive follows driveCmd, through a both-low gap on a
+// reversal. The servo follows steerCmd directly (a positional servo needs no gap).
+void serviceServoCar() {
+  double u = btnmod::clampCmd(driveCmd);
+  int want = btnmod::direction(u);
+  double m = fabs(u);
+  m = drivePwm ? m * throttleLimit : (m >= btnmod::BINARY_THRESHOLD ? 1.0 : 0.0);
+  if (want != 0 && driveDir != 0 && want != driveDir) {
+    driveDir = 0;
+    driveGapUntil = millis() + DRIVE_GAP_MS;
+  }
+  if (want == 0 || m <= 0.0) {
+    driveDir = 0;
+    driveOut(0, 0);
+  } else if ((long)(millis() - driveGapUntil) < 0) {
+    driveOut(0, 0);
+  } else {
+    driveDir = want;
+    driveOut(want, m);
+  }
+  servoWriteUs(servoUsFor(steerCmd));
+}
+
+void servoCarNeutral() {
+  driveCmd = steerCmd = 0.0;
+  driveDir = 0;
+  if (!actAttached) return;
+  driveOut(0, 0);
+  servoWriteUs(servoCenterUs);
+}
+
+// Hand GPIO19/20 to the GPIO matrix: at reset the USB-Serial-JTAG PHY owns them.
+void releaseUsbPad(int p) {
+#ifdef ARDUINO_ARCH_ESP32
+  if (p == 19 || p == 20) CLEAR_PERI_REG_MASK(USB_SERIAL_JTAG_CONF0_REG, USB_SERIAL_JTAG_USB_PAD_ENABLE);
+#else
+  (void)p;
+#endif
+}
+
+// Input enabled on an output pad, so `scope` can read back what the pin really does.
+void padInputEnable(int p) {
+#ifdef ARDUINO_ARCH_ESP32
+  PIN_INPUT_ENABLE(GPIO_PIN_MUX_REG[p]);
+#else
+  (void)p;
+#endif
+}
+
+void attachServoCar() {
+  // the steering button pins are not used by this actuator: held released
+  parkPin(pins[2]);
+  parkPin(pins[3]);
+  releaseUsbPad(servoPin);
+  servoLedcOk = ledcSetup(SERVO_LEDC_CH, SERVO_LEDC_FREQ_HZ, SERVO_LEDC_BITS) != 0;
+  driveLedcOk = ledcSetup(DRIVE_LEDC_CH[0], DRIVE_LEDC_FREQ_HZ, DRIVE_LEDC_BITS) != 0
+             && ledcSetup(DRIVE_LEDC_CH[1], DRIVE_LEDC_FREQ_HZ, DRIVE_LEDC_BITS) != 0;
+  ledcWrite(DRIVE_LEDC_CH[0], 0);
+  ledcWrite(DRIVE_LEDC_CH[1], 0);
+  ledcAttachPin(pins[0], DRIVE_LEDC_CH[0]);
+  ledcAttachPin(pins[1], DRIVE_LEDC_CH[1]);
+  ledcAttachPin(servoPin, SERVO_LEDC_CH);
+  padInputEnable(pins[0]);
+  padInputEnable(pins[1]);
+  padInputEnable(servoPin);
+  actAttached = true;
+  servoCarNeutral();
+  if (!servoLedcOk) Serial.println("ERROR: servo LEDC setup failed: steering is DEAD (check SERVO_LEDC_BITS <= 14)");
+  if (!driveLedcOk) Serial.println("ERROR: drive LEDC setup failed: the motor is DEAD");
+}
+
+void detachServoCar() {
+  if (!actAttached) return;
+  driveOut(0, 0);
+  ledcDetachPin(pins[0]);
+  ledcDetachPin(pins[1]);
+  ledcDetachPin(servoPin);
+  parkPin(servoPin);
+  actAttached = false;
+}
+
+// The actuator as configured: buttons, or drive PWM + servo.
+void configureActuator() {
+  if (act == ACT_SERVO) attachServoCar();
+  else configurePins();
+}
+
 void goNeutral() {
   btnmod::reset(throttleAxis);
   btnmod::reset(steerAxis);
-  releaseAll();
+  if (act == ACT_SERVO) servoCarNeutral();
+  else releaseAll();
 }
 
 // One slot for one axis: button_mod.h decides, this writes the two GPIOs.
@@ -312,6 +494,12 @@ void serviceSlots() {
 // for the next slot (at most slotMs away), where button_mod.h also owes the
 // reversal gap.
 void applyCommand(double thr, double str) {
+  if (act == ACT_SERVO) {
+    driveCmd = thr;
+    steerCmd = str;
+    serviceServoCar();     // at once: a stop or reversal never waits for a loop
+    return;
+  }
   if (btnmod::releaseNow(throttleAxis, thr)) { writeButton(0, false); writeButton(1, false); }
   if (btnmod::releaseNow(steerAxis, str))    { writeButton(2, false); writeButton(3, false); }
   throttleAxis.cmd = thr;
@@ -349,6 +537,19 @@ void loadSettings() {
   for (int b = 0; b < 4 && ok; b++)
     for (int c = b + 1; c < 4; c++) ok = ok && p[b] != p[c];
   for (int b = 0; b < 4; b++) pins[b] = ok ? p[b] : DEFAULT_PINS[b];
+  int a = prefs.getInt("act", DEFAULT_ACT);
+  act = (a == ACT_SERVO) ? ACT_SERVO : ACT_BUTTONS;
+  drivePwm = prefs.getBool("drv_pwm", DEFAULT_DRIVE_PWM);
+  int sp = prefs.getInt("servo_pin", DEFAULT_SERVO_PIN);
+  servoPin = (servoPinAllowed(sp) && sp != pins[0] && sp != pins[1]) ? sp : DEFAULT_SERVO_PIN;
+  int sc = prefs.getInt("srv_c", DEFAULT_SERVO_CENTER_US);
+  int sl = prefs.getInt("srv_l", DEFAULT_SERVO_LEFT_US);
+  int sr = prefs.getInt("srv_r", DEFAULT_SERVO_RIGHT_US);
+  bool sok = sc >= 500 && sc <= 2500 && sl >= 500 && sl <= 2500 && sr >= 500 && sr <= 2500
+             && sl != sr && (sc - sl) * (sc - sr) <= 0;
+  servoCenterUs = sok ? sc : DEFAULT_SERVO_CENTER_US;
+  servoLeftUs = sok ? sl : DEFAULT_SERVO_LEFT_US;
+  servoRightUs = sok ? sr : DEFAULT_SERVO_RIGHT_US;
 }
 
 const char *radioName(Radio r) { return r == RADIO_BLE ? "ble" : (r == RADIO_BOTH ? "both" : "wifi"); }
@@ -356,6 +557,14 @@ bool wifiWanted() { return radio != RADIO_BLE; }
 bool bleWanted() { return radio != RADIO_WIFI; }
 
 void printSettings() {
+  if (act == ACT_SERVO) {
+    Serial.printf("act SERVO: drive FWD=GPIO%d BACK=GPIO%d %s", pins[0], pins[1],
+                  drivePwm ? "PWM" : "BINARY");
+    if (drivePwm) Serial.printf(" (limit %.2f)", throttleLimit);
+    Serial.printf(" | servo GPIO%d centre %d us, left %d us, right %d us | radio %s\n",
+                  servoPin, servoCenterUs, servoLeftUs, servoRightUs, radioName(radio));
+    return;
+  }
   Serial.printf("buttons: FWD=GPIO%d BACK=GPIO%d LEFT=GPIO%d RIGHT=GPIO%d | mode %s",
                 pins[0], pins[1], pins[2], pins[3], modulated ? "MODULATED" : "BINARY");
   Serial.printf(", slot %d ms", slotMs);
@@ -366,11 +575,70 @@ void printSettings() {
 
 // `test`: press each button in turn so the wiring can be checked by eye.
 // Blocking on purpose and refused while driving; the car must be wheels off.
+#ifdef ARDUINO_ARCH_ESP32
+// Read a pad back for `ms`: share of time high, rising edges, and what that means.
+void scopePin(const char *label, int pin, unsigned long ms, bool servo) {
+  uint32_t n = 0, hi = 0, edges = 0;
+  int last = gpio_get_level((gpio_num_t)pin);
+  unsigned long t0 = micros();
+  while (micros() - t0 < ms * 1000UL) {
+    int v = gpio_get_level((gpio_num_t)pin);
+    n++;
+    hi += v;
+    if (v && !last) edges++;
+    last = v;
+  }
+  double duty = n ? 100.0 * hi / n : 0.0;
+  double hz = edges * 1000.0 / ms;
+  Serial.printf("  %-6s GPIO%-2d %5.1f%% high, %4lu rising edges in %lu ms (~%.0f Hz)", label, pin,
+                duty, (unsigned long)edges, ms, hz);
+  if (servo && edges) Serial.printf("  pulse ~%.0f us", duty / 100.0 * 1e6 / hz);
+  if (!edges) Serial.print(duty > 50 ? "  STUCK HIGH" : "  no pulses");
+  Serial.println();
+}
+#endif
+
+void runScope() {
+  if (act != ACT_SERVO) { Serial.println("scope: only with act servo"); return; }
+#ifdef ARDUINO_ARCH_ESP32
+  Serial.println("scope (the pads themselves):");
+  scopePin("FWD", pins[0], 100, false);
+  scopePin("BACK", pins[1], 100, false);
+  scopePin("SERVO", servoPin, 200, true);
+#else
+  Serial.println("scope: not on the host build");
+#endif
+}
+
+void runServoCarTest() {
+  Serial.println("TEST (act servo): wheels OFF the ground.");
+  struct Step { const char *what; double thr, str; unsigned long ms; };
+  const Step steps[] = {{"drive FORWARD 40%", 0.4 / throttleLimit, 0, 800}, {"stop", 0, 0, 400},
+                        {"drive BACKWARD 40%", -0.4 / throttleLimit, 0, 800}, {"stop", 0, 0, 400},
+                        {"steer LEFT", 0, 1.0, 700}, {"steer CENTRE", 0, 0, 700},
+                        {"steer RIGHT", 0, -1.0, 700}, {"steer CENTRE", 0, 0, 500}};
+  for (const Step &st : steps) {
+    Serial.printf("  %s\n", st.what);
+    driveCmd = st.thr;
+    steerCmd = st.str;
+    unsigned long t0 = millis();
+    while (millis() - t0 < st.ms) { serviceServoCar(); delay(5); }
+#ifdef ARDUINO_ARCH_ESP32
+    if (st.thr != 0) scopePin(st.thr > 0 ? "FWD" : "BACK", pins[st.thr > 0 ? 0 : 1], 50, false);
+    if (st.str != 0 || strcmp(st.what, "steer CENTRE") == 0) scopePin("SERVO", servoPin, 100, true);
+#endif
+  }
+  servoCarNeutral();
+  Serial.println("TEST done. Motor backwards? swap with: pins <back> <fwd> <x> <y>. Wheels turn the "
+                 "wrong way? swap left/right with: servo <centre> <right> <left>");
+}
+
 void runButtonTest() {
   if (!failsafeActive) {
     Serial.println("REFUSED: the car is being driven. Stop the controller first.");
     return;
   }
+  if (act == ACT_SERVO) { runServoCarTest(); return; }
   Serial.println("TEST: wheels OFF the ground. Pressing each button for 0.4 s:");
   for (int b = 0; b < 4; b++) {
     Serial.printf("  %-5s GPIO%d\n", PIN_NAMES[b], pins[b]);
@@ -471,13 +739,15 @@ void handleConsoleLine(char *line) {
       int got = sscanf(arg, "%d %d %d %d %c", &p[0], &p[1], &p[2], &p[3], &extra);
       bool ok = (got == 4);
       for (int b = 0; b < 4 && ok; b++) {
-        ok = pinAllowed(p[b]);
+        ok = pinAllowed(p[b]) && !(act == ACT_SERVO && p[b] == servoPin);
         for (int c = 0; c < b && ok; c++) ok = p[b] != p[c];
       }
       if (!ok) {
         Serial.println("REJECTED: pins <fwd> <back> <left> <right>, four different pins from "
                        "1 2 4-18 21 39-42 45 46 47 48 (see PIN RULES in the source)");
       } else {
+        goNeutral();
+        detachServoCar();
         releaseAll();
         for (int b = 0; b < 4; b++) {
           parkPin(pins[b]);                 // the old pin stays released
@@ -486,15 +756,76 @@ void handleConsoleLine(char *line) {
           snprintf(key, sizeof(key), "pin%d", b);
           prefs.putInt(key, p[b]);
         }
-        configurePins();
+        configureActuator();
+        goNeutral();
       }
     }
     printSettings();
   } else if (strcmp(line, "test") == 0) {
     runButtonTest();
+  } else if (strcmp(line, "scope") == 0) {
+    runScope();
+  } else if (strcmp(line, "act") == 0) {
+    if (hasArg && !refusedWhileDriving()) {
+      Act a;
+      bool ok = true;
+      if (strcmp(arg, "buttons") == 0) a = ACT_BUTTONS;
+      else if (strcmp(arg, "servo") == 0) a = ACT_SERVO;
+      else ok = false;
+      if (!ok) {
+        Serial.println("REJECTED: act buttons | act servo");
+      } else if (a != act) {
+        goNeutral();
+        detachServoCar();
+        act = a;
+        prefs.putInt("act", (int)a);
+        configureActuator();
+        goNeutral();
+      }
+    }
+    printSettings();
+  } else if (strcmp(line, "drive") == 0) {
+    if (hasArg && !refusedWhileDriving()) {
+      if (strcmp(arg, "pwm") == 0 || strcmp(arg, "binary") == 0) {
+        goNeutral();
+        drivePwm = strcmp(arg, "pwm") == 0;
+        prefs.putBool("drv_pwm", drivePwm);
+      } else {
+        Serial.println("REJECTED: drive pwm | drive binary");
+      }
+    }
+    printSettings();
+  } else if (strcmp(line, "servo") == 0) {
+    if (hasArg && !refusedWhileDriving()) {
+      int c, l, r;
+      char extra;
+      if (strncmp(arg, "pin", 3) == 0) {
+        if (parseLong(arg + 3, n) && servoPinAllowed((int)n) && n != pins[0] && n != pins[1]) {
+          goNeutral();
+          detachServoCar();
+          servoPin = (int)n;
+          prefs.putInt("servo_pin", servoPin);
+          configureActuator();
+          goNeutral();
+        } else {
+          Serial.println("REJECTED: servo pin <n>: a pin from 1 2 4-21 39-42 45-48, not a drive pin");
+        }
+      } else if (sscanf(arg, "%d %d %d %c", &c, &l, &r, &extra) == 3 && c >= 500 && c <= 2500
+                 && l >= 500 && l <= 2500 && r >= 500 && r <= 2500 && l != r
+                 && ((c - l) * (c - r) <= 0)) {
+        servoCenterUs = c; servoLeftUs = l; servoRightUs = r;
+        prefs.putInt("srv_c", c); prefs.putInt("srv_l", l); prefs.putInt("srv_r", r);
+        goNeutral();
+      } else {
+        Serial.println("REJECTED: servo <centre> <left> <right> in us (500..2500, centre between them)");
+      }
+    }
+    printSettings();
   } else if (*line) {
     Serial.println("commands: index [n] | mode [mod|binary] | slot [ms] | limit [0.1..1] | "
-                   "pins [fwd back left right] | radio [wifi|ble|both] | test");
+                   "pins [fwd back left right] | radio [wifi|ble|both] | test | "
+                   "act [buttons|servo] | drive [pwm|binary] | servo [centre left right] | "
+                   "servo pin <n> | scope");
   }
 }
 
@@ -531,12 +862,14 @@ void sendInfo(const Reply &to) {
   snprintf(buf, sizeof(buf),
            "{\"car\":%d,\"fw\":\"%s\",\"mac\":\"%s\",\"failsafe\":%s,"
            "\"up_s\":%lu,\"last_seq\":%ld,\"rssi\":%s,\"ota\":%s,"
-           "\"act\":\"buttons4\",\"mode\":\"%s\",\"slot_ms\":%d,\"thr_limit\":%.2f,"
+           "\"act\":\"%s\",\"mode\":\"%s\",\"slot_ms\":%d,\"thr_limit\":%.2f,"
            "\"radio\":\"%s\",\"via\":\"%s\"}",
            carIndex, FW_VERSION, WiFi.macAddress().c_str(),
            failsafeActive ? "true" : "false", millis() / 1000UL, lastSeq,
            rssiText(to, rssi, sizeof(rssi)), otaEnabled ? "true" : "false",
-           modulated ? "mod" : "binary", slotMs, throttleLimit,
+           act == ACT_SERVO ? "servo" : "buttons4",
+           act == ACT_SERVO ? (drivePwm ? "pwm" : "binary") : (modulated ? "mod" : "binary"),
+           slotMs, throttleLimit,
            radioName(radio), viaName(to.via));
   sendReply(to, buf);
 }
@@ -760,6 +1093,7 @@ void setup() {
     if (pins[b] != defaults[b]) parkPin(defaults[b]);   // stored pins differ
   }
   configurePins();
+  configureActuator();
   goNeutral();
 
   // BLE first, before any WiFi call: the coexistence layer is set up by whichever
@@ -825,7 +1159,10 @@ void loop() {
     Serial.println("FAILSAFE: command stream stalled -> buttons released");
   }
 
-  if (failsafeActive) {
+  if (act == ACT_SERVO) {
+    if (failsafeActive) servoCarNeutral();   // drive low, servo centred
+    else serviceServoCar();
+  } else if (failsafeActive) {
     releaseAll();          // nothing pressed while stopped, whatever the axes hold
     nextSlotMs = millis(); // the first slot after a stop runs at once (and no wrap)
   } else {

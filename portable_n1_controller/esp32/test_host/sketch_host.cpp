@@ -28,6 +28,7 @@
 //   PIN <gpio> <0|1>             an output changed level
 //   TX <text>                    a line the sketch printed on its UART (CR/LF stripped)
 //   UDP <ip>:<port> <text>       a datagram the sketch sent
+//   LEDCSETUP / ATTACH / DETACH / LEDC <ch> <duty>   the LEDC peripheral (servo + drive PWM)
 #include <cstdio>
 #include <iostream>
 #include <map>
@@ -78,6 +79,21 @@ void host_tx(const uint8_t *d, size_t n) {
       g_tx_line += c;
     }
   }
+}
+
+static std::map<int, uint32_t> g_ledc;
+void host_ledc_setup(int ch, double freq, int bits) {
+  emit("LEDCSETUP " + std::to_string(ch) + " " + std::to_string((long)freq) + " " + std::to_string(bits));
+}
+void host_ledc_attach(int pin, int ch) {
+  emit("ATTACH " + std::to_string(pin) + " " + std::to_string(ch));
+}
+void host_ledc_detach(int pin) { emit("DETACH " + std::to_string(pin)); }
+void host_ledc_write(int ch, uint32_t duty) {
+  auto it = g_ledc.find(ch);
+  if (it != g_ledc.end() && it->second == duty) return;
+  g_ledc[ch] = duty;
+  emit("LEDC " + std::to_string(ch) + " " + std::to_string(duty));
 }
 
 void host_udp_tx(const IPAddress &ip, uint16_t port, const std::string &data) {

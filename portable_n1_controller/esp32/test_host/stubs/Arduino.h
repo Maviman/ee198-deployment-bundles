@@ -26,6 +26,21 @@ inline unsigned long millis() { return host_now_ms; }
 inline void delay(unsigned long ms) { host_now_ms += ms; }
 inline void pinMode(int, int) {}
 inline void digitalWrite(int pin, int level) { host_pin_write(pin, level); }
+
+// LEDC (Arduino-ESP32 2.x API), recorded: sketch_host.cpp emits
+//   LEDCSETUP <ch> <freq> <bits>, ATTACH <pin> <ch>, DETACH <pin>, LEDC <ch> <duty> (on change).
+// ledcSetup returns 0 for more than 14 bits, as the ESP32-S3 does (see the sketch).
+void host_ledc_setup(int ch, double freq, int bits);
+void host_ledc_attach(int pin, int ch);
+void host_ledc_detach(int pin);
+void host_ledc_write(int ch, uint32_t duty);
+inline double ledcSetup(uint8_t ch, double freq, uint8_t bits) {
+  host_ledc_setup(ch, freq, bits);
+  return bits > 14 ? 0.0 : freq;
+}
+inline void ledcAttachPin(uint8_t pin, uint8_t ch) { host_ledc_attach(pin, ch); }
+inline void ledcDetachPin(uint8_t pin) { host_ledc_detach(pin); }
+inline void ledcWrite(uint8_t ch, uint32_t duty) { host_ledc_write(ch, duty); }
 inline int max(int a, int b) { return a > b ? a : b; }
 
 class String {

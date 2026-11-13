@@ -553,3 +553,103 @@ def test_boot_with_wifi_present_is_the_same_boot(fw):
     f = fw("--wifi-up")
     assert any("connecting to WiFi" in line for line in logs(f.boot))
     assert "IP: 192.168.4.77  listening on UDP 8888" in logs(f.run(1))
+
+
+# ------------------------------------------------------- act servo (2026-11-13) ----
+SERVO_CENTRE_DUTY = (1500 << 14) // 20000      # 1228: 1.5 ms of a 20 ms frame, 14-bit
+SERVO_LEFT_DUTY = (1800 << 14) // 20000        # 1474
+SERVO_RIGHT_DUTY = (1200 << 14) // 20000       # 983
+
+
+def ledc(events):
+    """{channel: last duty} from LEDC events."""
+    out = {}
+    for e in events:
+        if e.kind == "LEDC":
+            ch, duty = map(int, e.text.split())
+            out[ch] = duty
+    return out
+
+
+def servo_car(fw):
+    f = fw()
+    f.rx(b"pins 2 1 41 42\n")                 # this car: FWD=GPIO2, BACK=GPIO1
+    ev = f.rx(b"act servo\n")
+    return f, ev
+
+
+def test_act_servo_attaches_drive_pwm_and_a_14bit_servo_on_gpio19(fw):
+    f, ev = servo_car(fw)
+    setups = [e.text for e in ev if e.kind == "LEDCSETUP"]
+    assert "0 50 14" in setups, "servo: 50 Hz, 14-bit (16 fails on the S3 and the pin stays dead)"
+    assert "2 20000 10" in setups and "3 20000 10" in setups
+    attach = {tuple(map(int, e.text.split())) for e in ev if e.kind == "ATTACH"}
+    assert attach == {(2, 2), (1, 3), (19, 0)}, attach
+    assert not any("ERROR" in line for line in logs(ev))
+    d = ledc(ev)
+    assert d[0] == SERVO_CENTRE_DUTY and d[2] == 0 and d[3] == 0, "boots stopped and centred"
+    assert 41 not in f.pressed and 42 not in f.pressed, "the old steering button pins stay released"
+
+
+def test_servo_car_drives_proportionally_and_steers_by_pulse_width(fw):
+    f, _ = servo_car(fw)
+    d = ledc(f.rx(frame(1, (0.5, 1.0))))
+    assert d[2] == round(0.5 * 0.6 * 1023) and d.get(3, 0) == 0, "forward PWM = |thr| x limit 0.6"
+    assert d[0] == SERVO_LEFT_DUTY, "+steer = left = 1800 us"
+    d = ledc(f.rx(frame(2, (0.5, -1.0))))
+    assert d[0] == SERVO_RIGHT_DUTY
+    d = ledc(f.rx(frame(3, (0.5, 0.25))))
+    assert d[0] == (round(1500 + 0.25 * 300) << 14) // 20000, "in between: proportional"
+
+
+def test_servo_car_reverses_through_a_both_low_gap(fw):
+    f, _ = servo_car(fw)
+    f.rx(frame(1, (1.0, 0.0)))
+    d = ledc(f.rx(frame(2, (-1.0, 0.0))))
+    assert d.get(2) == 0 and d.get(3, 0) == 0, "forward cut at once, reverse not yet"
+    d = ledc(f.run(30))
+    assert 3 not in d or d[3] == 0
+    f.rx(frame(3, (-1.0, 0.0)))
+    d = ledc(f.run(20) + f.rx(frame(4, (-1.0, 0.0))))
+    assert d.get(3) == round(0.6 * 1023), "reverse after the 40 ms gap"
+
+
+def test_servo_car_deadman_and_estop_stop_the_motor_and_centre_the_servo(fw):
+    f, _ = servo_car(fw)
+    f.rx(frame(1, (0.8, -0.7)))
+    d = ledc(f.run(299))
+    assert not d, "still driving inside 300 ms"
+    d = ledc(f.run(2))
+    assert d[2] == 0 and d[0] == SERVO_CENTRE_DUTY, "deadman: motor off, servo centred"
+    f.rx(frame(2, (0.8, -0.7)))
+    d = ledc(f.rx(frame(3, (0.8, -0.7), estop=True)))
+    assert d[2] == 0 and d[0] == SERVO_CENTRE_DUTY
+
+
+def test_drive_binary_is_full_on_above_a_third(fw):
+    f, _ = servo_car(fw)
+    f.rx(b"drive binary\n")
+    assert ledc(f.rx(frame(1, (0.4, 0.0))))[2] == 1023
+    assert ledc(f.rx(frame(2, (0.2, 0.0))))[2] == 0
+
+
+def test_servo_settings_validate_and_switching_back_restores_the_buttons(fw):
+    f, _ = servo_car(fw)
+    assert any("REJECTED" in line for line in logs(f.rx(b"servo 3000 1800 1200\n")))
+    assert any("REJECTED" in line for line in logs(f.rx(b"servo 1000 1800 1200\n"))), "centre outside the throw"
+    ev = f.rx(b"servo 1500 1200 1800\n")                  # swapped: left is now the short pulse
+    assert any("left 1200 us, right 1800 us" in line for line in logs(ev))
+    assert ledc(f.rx(frame(1, (0.0, 1.0))))[0] == SERVO_RIGHT_DUTY
+    f.run(400)
+    assert any("REJECTED" in line for line in logs(f.rx(b"pins 19 1 41 42\n"))), "the servo pin is not a drive pin"
+    ev = f.rx(b"act buttons\n")
+    assert {e.text for e in ev if e.kind == "DETACH"} == {"2", "1", "19"}
+    f.rx(frame(2, (1.0, 0.0)))
+    f.run(60)
+    assert 2 in f.pressed, "buttons mode drives the FWD pin again"
+
+
+def test_act_is_refused_while_driving(fw):
+    f, _ = servo_car(fw)
+    f.rx(frame(1, (0.5, 0.0)))
+    assert any("REFUSED" in line for line in logs(f.rx(b"act buttons\n")))

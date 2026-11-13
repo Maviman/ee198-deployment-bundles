@@ -323,8 +323,11 @@ def serve(args) -> int:
         return 1
 
     feeds = []
+    cfg_path = args.camera_config or ROOT / "config" / "camera.yaml"
     for k, dev in chosen:
-        cam = base.with_overrides(device=dev)
+        # each camera's own exposure and gain (found by device), on the shared mode
+        cam = load_camera_config(cfg_path, device=dev).with_overrides(
+            width=base.width, height=base.height, fps=base.fps)
         name = card_name(dev)
         tag = f"cam{k}"
 

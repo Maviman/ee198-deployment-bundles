@@ -50,5 +50,10 @@ def undistort_points(points_px, camera_matrix, dist_coeffs) -> np.ndarray:
     import cv2  # local import: pure-geometry helpers above stay OpenCV-free
 
     K = np.asarray(camera_matrix, dtype=np.float64).reshape(3, 3)
-    out = cv2.undistortPoints(pts.reshape(-1, 1, 2), K, dist, P=K)
+    # Iterated to convergence: OpenCV's default stops after a few rounds, which leaves
+    # 1.6 px of error near the edge of a wide (X1) lens, a few cm on the floor.
+    out = cv2.undistortPointsIter(pts.reshape(-1, 1, 2), K, dist, None, K, UNDISTORT_CRITERIA)
     return out.reshape(-1, 2)
+
+
+UNDISTORT_CRITERIA = (3, 40, 1e-6)    # cv2.TERM_CRITERIA_COUNT | EPS, 40 rounds, 1e-6

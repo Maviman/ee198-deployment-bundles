@@ -33,6 +33,34 @@ def overhead_homography(image_size, arena_half_extent, fill: float = 0.9) -> np.
     return H
 
 
+def corner_camera_homography(image_size, arena_half_extent, corner: tuple[int, int], *,
+                             height_m: float = 1.1, back_m: float = 0.45, hfov_deg: float = 80.0,
+                             aim: float = 0.45, roll_deg: float = 0.0) -> np.ndarray:
+    """Pixel -> arena homography of a pinhole camera standing ``back_m`` outside corner
+    ``corner`` = (sx, sy) (e.g. (1, -1) = bottom-right) at ``height_m``, looking along the
+    diagonal at the floor point ``aim`` of the way from the centre to the far corner: the
+    two-corner-camera arena. Tune it so the far corner is just past the top of the frame
+    and the other three are in it, as with the real corner cameras."""
+    w, h = image_size
+    hw, hh = arena_half_extent
+    sx, sy = corner
+    diag = np.array([sx * hw, sy * hh]) / math.hypot(hw, hh)
+    cam = np.array([sx * hw + diag[0] * back_m, sy * hh + diag[1] * back_m, height_m])
+    target = np.array([-sx * hw * aim, -sy * hh * aim, 0.0])
+    z = (target - cam) / np.linalg.norm(target - cam)
+    x = np.cross(z, [0.0, 0.0, 1.0])
+    x /= np.linalg.norm(x)
+    y = np.cross(z, x)
+    r = math.radians(roll_deg)
+    x, y = math.cos(r) * x + math.sin(r) * y, -math.sin(r) * x + math.cos(r) * y
+    R = np.vstack([x, y, z])
+    t = -R @ cam
+    f = (w / 2) / math.tan(math.radians(hfov_deg) / 2)
+    K = np.array([[f, 0, w / 2], [0, f, h / 2], [0, 0, 1.0]])
+    H = np.linalg.inv(K @ np.column_stack([R[:, 0], R[:, 1], t]))
+    return H / H[2, 2]
+
+
 def tag_corners_arena(x: float, y: float, heading: float, side_m: float) -> np.ndarray:
     """Arena-frame corners [TL, TR, BR, BL] of a tag whose canonical top edge
     faces ``heading`` (the mounting rule: top edge toward the car's nose)."""
@@ -44,7 +72,7 @@ def tag_corners_arena(x: float, y: float, heading: float, side_m: float) -> np.n
 
 class SceneRenderer:
     def __init__(self, marker_map, homography, image_size, arena_half_extent, *, seed: int = 0,
-                 blur_px: int = 3, noise: float = 4.0) -> None:
+                 blur_px: int = 3, noise: float = 4.0, tape: float = 240.0, k1: float = 0.0) -> None:
         self.marker_map = marker_map
         self.H = np.asarray(homography, dtype=np.float64)
         self.Hinv = np.linalg.inv(self.H)
@@ -53,6 +81,16 @@ class SceneRenderer:
         self.blur_px = int(blur_px)
         self.noise = float(noise)
         self.rng = np.random.default_rng(seed)
+        self.tape = float(tape)
+        self._lens_maps = None
+        if k1:
+            # barrel distortion (OpenCV's k1 about the centre, nominal focal length, the same
+            # model vision/lens.py fits): each output pixel samples the pinhole render
+            from .lens import nominal_K, undistort
+            w, h = self.size
+            grid = np.stack(np.meshgrid(np.arange(w, dtype=np.float64), np.arange(h, dtype=np.float64)), -1)
+            src = undistort(grid.reshape(-1, 2), nominal_K(self.size), k1).reshape(h, w, 2).astype(np.float32)
+            self._lens_maps = (src[..., 0].copy(), src[..., 1].copy())
         spec = family_spec(marker_map.dictionary)
         self.full_dict = cv2.aruco.getPredefinedDictionary(getattr(cv2.aruco, spec.opencv_dict))
         self._tiles: dict[int, np.ndarray] = {}
@@ -72,9 +110,10 @@ class SceneRenderer:
             cv2.rectangle(img, (x, y), (x + int(rng.integers(8, 50)), y + int(rng.integers(8, 50))),
                           float(rng.integers(20, 235)), -1)
         hw, hh = self.half
-        edge = arena_frame.project_px_to_arena(
-            self.Hinv, [[-hw, hh], [hw, hh], [hw, -hh], [-hw, -hh]]).astype(np.int32)
-        cv2.polylines(img, [edge], True, 240.0, max(2, w // 300))   # boundary tape
+        edge = arena_frame.project_px_to_arena(self.Hinv, [[-hw, hh], [hw, hh], [hw, -hh], [-hw, -hh]])
+        # boundary tape, anti-aliased at 1/16 px so its centre line is straight (lens tests)
+        cv2.polylines(img, [np.round(edge * 16).astype(np.int32)], True, self.tape, max(2, w // 300),
+                      cv2.LINE_AA, 4)
         return np.clip(img, 0, 255).astype(np.uint8)
 
     def _tile(self, marker_id: int) -> np.ndarray:
@@ -118,6 +157,8 @@ class SceneRenderer:
             self._stamp(img, cid, tag_corners_arena(cx, cy, math.pi / 2, mm.corner_tag_m))
         for vid, (x, y, heading) in vehicles.items():
             self._stamp(img, vid, tag_corners_arena(x, y, heading, mm.vehicle_tag_m))
+        if self._lens_maps is not None:
+            img = cv2.remap(img, *self._lens_maps, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
         if self.blur_px > 1:
             k = np.zeros((self.blur_px, self.blur_px), np.float32)
             k[self.blur_px // 2, :] = 1.0 / self.blur_px

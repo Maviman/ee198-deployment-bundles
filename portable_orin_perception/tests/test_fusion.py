@@ -54,3 +54,11 @@ def test_vehicles_unseen_by_every_camera_are_absent():
     f.update(0, {0: (0.1, 0.2, 0.3)}, {0: 20.0}, 1.0)
     f.forget(0)
     assert f.update(1, {}, {}, 1.0) == {}
+
+
+def test_spread_reports_how_far_apart_the_cameras_put_one_car():
+    f = PoseFuser([1], window_s=0.05)
+    f.update(0, {1: (0.50, -0.40, 0.0)}, {1: 30.0}, t=1.000)
+    assert 1 not in f.spread                      # one camera: nothing to compare
+    f.update(1, {1: (0.53, -0.36, 0.0)}, {1: 15.0}, t=1.020)
+    assert math.isclose(f.spread[1], 0.05, abs_tol=1e-6)

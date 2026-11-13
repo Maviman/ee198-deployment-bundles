@@ -542,24 +542,25 @@ def cmd_scan(args, cfg: Config) -> None:
         _ctl(cfg, "disarm")
     except SystemExit:
         warn(f"could not reach the control Orin ({cfg.control.target}) to disarm; scanning anyway")
-    slots = [(i, f" --slot {i} --device {shlex.quote(d)}") for i, d in enumerate(cfg.cameras)] or [(0, "")]
-    rc = 0
-    for i, slot_args in slots:
-        step(f"scanning the arena from {v.target}" + (f", camera {i} of {len(slots)}" if len(slots) > 1 else ""))
-        p = run_on(v, f'''
+    # Several cameras are scanned in ONE run and calibrated together: a corner camera sees
+    # only three corner tags, and the tags both cameras see supply the fourth.
+    cams = "".join(f" --camera {shlex.quote(d)}" for d in cfg.cameras)
+    step(f"scanning the arena from {v.target}" + (f" with {len(cfg.cameras)} cameras" if len(cfg.cameras) > 1 else ""))
+    p = run_on(v, f'''
 if pid=$(svc_pid vision); then echo "(stopping the vision service: the camera can only be opened once)"; svc_stop vision >/dev/null; fi
 {"if pid=$(svc_pid feeds); then echo \"(stopping the feeds service: it holds the other cameras)\"; svc_stop feeds >/dev/null; fi" if cfg.cameras else ""}
 free_cameras
-cd portable_orin_perception && {v.python} -u scan_arena.py {extra}{slot_args}
+cd portable_orin_perception && {v.python} -u scan_arena.py {extra}{cams}
 ''', lib=True, tty=not v.local)
-        if not v.local:
+    if not v.local:
+        for i in range(max(len(cfg.cameras), 1)):
             dest = REPO / ("arena_scan.png" if i == 0 else f"arena_scan.{i}.png")
-            scp = subprocess.run(["scp", "-q", f"{v.target}:.arena/scan/latest.png", str(dest)])
+            src = ".arena/scan/latest.png" if i == 0 else f".arena/scan/latest.{i}.png"
+            scp = subprocess.run(["scp", "-q", f"{v.target}:{src}", str(dest)])
             if scp.returncode == 0:
                 print(f"\nsnapshot copied to {dest}")
-        rc = rc or p.returncode
-    if rc != 0:
-        raise SystemExit(rc)
+    if p.returncode != 0:
+        raise SystemExit(p.returncode)
     print("\nNext: `arena up`." if not args.check else "")
 
 

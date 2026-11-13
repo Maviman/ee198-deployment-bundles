@@ -83,19 +83,60 @@ def local_override_path(path, slot: int | None = None) -> Path:
     return path.with_name(path.stem + tag + ".local" + path.suffix)
 
 
-def load_camera_config(path, *, local_overrides: bool = True, slot: int | None = None) -> CameraConfig:
+# Settings that belong to ONE physical camera rather than to the site. A C270 tuned to
+# exposure 120 / gain 20 as the overhead camera kept those values when the X1 took its
+# slot (2026-11-12): they are looked up by the camera's device, not by its slot.
+PER_CAMERA = ("device", "exposure", "gain", "focus")
+
+
+def same_device(a, b) -> bool:
+    """True when two device paths name the same camera (a by-id link and the /dev/videoN it
+    points at count as the same)."""
+    if not a or not b:
+        return False
+    if str(a) == str(b):
+        return True
+    import os
+    return os.path.realpath(str(a)) == os.path.realpath(str(b))
+
+
+def _local_files(path: Path) -> list[Path]:
+    """camera.local.yaml, then camera.<k>.local.yaml in slot order."""
+    shared = local_override_path(path)
+    slots = sorted(path.parent.glob(f"{path.stem}.*.local{path.suffix}"),
+                   key=lambda p: int(p.name.split(".")[1]) if p.name.split(".")[1].isdigit() else 1 << 30)
+    return ([shared] if shared.exists() else []) + [p for p in slots if p.name.split(".")[1].isdigit()]
+
+
+def load_camera_config(path, *, local_overrides: bool = True, slot: int | None = None,
+                       device: str | None = None) -> CameraConfig:
     """config/camera.yaml, with config/camera.local.yaml merged on top when present, then
-    config/camera.<slot>.local.yaml for a camera slot >= 1."""
+    config/camera.<slot>.local.yaml for a camera slot >= 1.
+
+    Site settings (mode, anti-flicker, ...) merge in that order. The per-camera ones
+    (PER_CAMERA) come from ONE file: with ``device`` given, the local file whose ``device``
+    names that camera (its own slot's file first), so its exposure follows it to whatever
+    slot it is in now and never lands on another camera; without one, or when no file
+    names it, the slot's own file when that names no device (camera.local.yaml is slot 0's)."""
     path = Path(path)
     data = _read(path) if path.exists() else {}
     if local_overrides:
-        for local in ({local_override_path(path), local_override_path(path, slot)}):
-            if local.exists():
-                data.update(_read(local))
-        # a slot's own file wins over the shared one
         own = local_override_path(path, slot)
-        if slot and own.exists():
-            data.update(_read(own))
+        shared = local_override_path(path)
+        for local in [shared] + ([own] if slot else []):
+            if local.exists():
+                data.update({k: v for k, v in _read(local).items() if k not in PER_CAMERA})
+        files = {f: _read(f) for f in _local_files(path)}
+        order = [own] + [f for f in files if f != own]
+        pick = None
+        if device is not None:
+            pick = next((f for f in order if f in files and same_device(files[f].get("device"), device)), None)
+        if pick is None and own in files and (device is None or not files[own].get("device")):
+            pick = own
+        if pick is not None:
+            data.update({k: v for k, v in files[pick].items() if k in PER_CAMERA})
+    if device is not None:
+        data["device"] = device
     cfg = CameraConfig(**data)
     if cfg.exposure != "auto":
         cfg = replace(cfg, exposure=int(cfg.exposure))
@@ -104,10 +145,13 @@ def load_camera_config(path, *, local_overrides: bool = True, slot: int | None =
 
 def write_local_override(path, slot: int | None = None, **values) -> Path:
     """Merge ``values`` into camera.local.yaml next to ``path`` (camera.<slot>.local.yaml
-    for a camera slot >= 1); returns its path."""
+    for a camera slot >= 1); returns its path. Writing a ``device`` other than the one
+    the file names drops that other camera's exposure, gain and focus."""
     path = Path(path)
     local = local_override_path(path, slot)
     data = _read(local) if local.exists() else {}
+    if values.get("device") and data.get("device") and not same_device(values["device"], data["device"]):
+        data = {k: v for k, v in data.items() if k not in PER_CAMERA}
     data.update(values)
     local.write_text(
         "# Site-specific camera overrides (gitignored). Written by `arena scan`;\n"

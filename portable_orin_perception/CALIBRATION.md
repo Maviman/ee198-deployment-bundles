@@ -56,6 +56,37 @@ define the fit.
    within ~2 cm and heading matching how you pointed it (+x = 0, +y = π/2
    ≈ 1.57, CCW positive).
 
+## Two corner cameras (the 8 ft arena since 2026-11-11)
+
+Two cameras stand outside opposite corners (the Webcam X1 at the tag-12 corner
+is camera 0, the Logitech C270 at the tag-10 corner is camera 1: `[vision]
+cameras` in `deploy/arena.local.conf`, in that order). Each sees its OWN corner
+tag near the bottom of its frame and the two side tags (11, 13) near the top;
+the far corner is past the top of the frame, and that is fine. `arena scan`
+(and CALIBRATE) then scans both in one run and calibrates them TOGETHER:
+
+1. **Aim:** each camera's own corner tag fully in frame with a margin at the
+   bottom, both side tags in frame. Mark the mounts so they can be replaced.
+2. **Shared tags:** at least two tags BOTH cameras see, one in each half of the
+   arena (the halves are split by the line from tag 11 to tag 13), away from that
+   line: the evader and a car, or the spare tags 2 / 3. A third gives the fit a
+   check it did not use (the `cross-check` line). Nothing may move during the scan:
+   the cameras are captured one after the other.
+3. **Lens:** each camera's lens distortion is measured from the boundary tape
+   between its corner tags (`lens` line; the X1 bends straight tape by ~4 px) and
+   saved to `config/camera_info.<k>.yaml`. It is kept for later scans of that same
+   camera; `arena scan --lens` re-measures it. A checkerboard calibration (step 1)
+   in that file is used instead and never overwritten.
+4. **Read:** `cameras agree` = how far apart the two cameras put each shared tag
+   (aim: under 3 cm); `cross-check` = the same with each tag left out of the fit;
+   `fit` = how firmly the shared tags pin each camera's missing corner.
+
+Settings follow the camera, not its slot: exposure and gain live in the
+`camera.local.yaml` / `camera.<k>.local.yaml` whose `device:` names that camera,
+and a homography or lens file made for one camera is refused on another (reorder
+`cameras` and `arena up` says to re-scan). While driving, the vision service logs
+`cameras apart` per car (telemetry `spread_cm`): the live version of `cameras agree`.
+
 ## Parallax (the ~5 cm roof-height detail)
 
 Vehicle markers ride on car roofs, ~5 cm above the floor plane the homography

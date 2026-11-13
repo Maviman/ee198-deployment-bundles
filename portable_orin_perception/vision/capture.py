@@ -237,7 +237,8 @@ class SyntheticSource(_SourceBase):
     """
 
     def __init__(self, renderer, marker_map, *, fps: float, world_port: int | None = None,
-                 corners: dict | None = None, jpeg_quality: int = 85, log=print) -> None:
+                 corners: dict | None = None, vehicles: dict | None = None, jpeg_quality: int = 85,
+                 log=print) -> None:
         super().__init__()
         from .synthetic import ChaseScript
 
@@ -248,6 +249,7 @@ class SyntheticSource(_SourceBase):
         self.jpeg_quality = int(jpeg_quality)
         self.log = log
         self.world: dict[int, tuple[float, float, float]] = {}
+        self.parked = vehicles          # {id: (x, y, heading)}: a still scene (a calibration scan)
         self.world_port = world_port
         self.script = ChaseScript(len(marker_map.pursuer_ids), renderer.half)
         self.actual_mode = (renderer.size[0], renderer.size[1], self.fps)
@@ -288,6 +290,8 @@ class SyntheticSource(_SourceBase):
             if self._sock is not None:
                 self._drain_world()
                 poses = self.world
+            elif self.parked is not None:
+                poses = self.parked
             else:
                 poses = self.script.poses(now - start, self.marker_map)
             t_cap = time.perf_counter()

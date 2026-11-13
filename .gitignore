@@ -14,7 +14,12 @@ portable_orin_perception/config/arena_homography.yaml
 # Arena deployment: per-site topology, per-room camera overrides, scan output
 deploy/arena.local.conf
 portable_orin_perception/config/camera.local.yaml
+# per camera of a multi-camera arena: camera k's overrides, lens, homography, snapshot
+portable_orin_perception/config/camera.*.local.yaml
+portable_orin_perception/config/camera_info.*.yaml
+portable_orin_perception/config/arena_homography.*.yaml
 arena_scan.png
+arena_scan.*.png
 
 # Offline Orin install folders + download cache (deploy/offline/build_packages.py)
 dist/

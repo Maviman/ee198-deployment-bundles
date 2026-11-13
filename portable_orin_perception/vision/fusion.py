@@ -29,6 +29,9 @@ class PoseFuser:
         # vehicle id -> camera index -> (x, y, heading, side_px, t)
         self._est: dict[int, dict[int, tuple[float, float, float, float, float]]] = {
             int(v): {} for v in vehicle_ids}
+        # vehicle id -> how far apart the cameras last put it (m), when 2+ saw it together:
+        # the live check that the joint calibration still holds
+        self.spread: dict[int, float] = {}
 
     def update(self, cam: int, found: Mapping[int, tuple[float, float, float]],
                sizes: Mapping[int, float], t: float) -> dict[int, tuple[float, float, float, float, dict]]:
@@ -44,6 +47,9 @@ class PoseFuser:
             fresh = {c: e for c, e in by_cam.items() if abs(t - e[4]) <= self.window_s}
             if not fresh:
                 continue
+            if len(fresh) > 1:
+                pts = [(e[0], e[1]) for e in fresh.values()]
+                self.spread[vid] = max(math.dist(a, b) for i, a in enumerate(pts) for b in pts[i + 1:])
             weights = {c: e[3] ** 2 for c, e in fresh.items()}
             total = sum(weights.values())
             x = sum(w * fresh[c][0] for c, w in weights.items()) / total

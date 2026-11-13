@@ -40,7 +40,7 @@ from pathlib import Path
 import numpy as np
 
 from hive_perception.core import arena_frame
-from hive_perception.core.camera_config import CameraConfig, load_camera_config
+from hive_perception.core.camera_config import CameraConfig, load_camera_config, same_device
 from hive_perception.core.frame_builder import FrameBuilder, load_marker_map
 from hive_perception.core.localizer import Localizer, corner_drift_px
 from hive_perception.core.tag_family import family_spec
@@ -71,10 +71,10 @@ def parse_targets(spec: str | None, default_port: int) -> list[tuple[str, int]]:
     return out
 
 
-def load_intrinsics(path: Path, size: tuple[int, int]):
+def load_intrinsics(path: Path, size: tuple[int, int], device: str | None = None):
     """(K, D) or (None, None). Placeholder/all-zero distortion -> (None, None)
-    (undistortion would be a no-op). Real intrinsics at another resolution ->
-    refuse: they are in pixels and would scale every pose."""
+    (undistortion would be a no-op). Real intrinsics at another resolution, or measured
+    on another camera than ``device`` -> refuse: they would bend every pose."""
     import yaml
 
     try:
@@ -85,6 +85,10 @@ def load_intrinsics(path: Path, size: tuple[int, int]):
         return None, None
     if not np.any(D):
         return None, None
+    if device and data.get("device") and not same_device(data["device"], device):
+        raise SystemExit(
+            f"{path} is the lens of {data['device']}, but this slot is now {device}: the camera "
+            "list changed. Run `arena scan` (it re-measures each camera's lens).")
     cal = (int(data.get("image_width", size[0])), int(data.get("image_height", size[1])))
     if cal != tuple(size):
         raise SystemExit(
@@ -182,8 +186,7 @@ class VisionService:
         self.slots: list[CameraSlot] = []
         specs = [(getattr(args, "device", None), None)] if self.synthetic else parse_cameras(args)
         for i, (dev, hpath) in enumerate(specs):
-            cam = load_camera_config(args.camera_config or cfg / "camera.yaml",
-                                     slot=i or None).with_overrides(device=dev)
+            cam = load_camera_config(args.camera_config or cfg / "camera.yaml", slot=i or None, device=dev)
             if self.synthetic:
                 from .synthetic import overhead_homography
                 H = overhead_homography(cam.size, self.half, fill=0.9)
@@ -202,7 +205,11 @@ class VisionService:
                         f"camera {i} was calibrated at {cal_size[0]}x{cal_size[1]} but captures "
                         f"{cam.width}x{cam.height}. A homography is pixel geometry, so every pose "
                         "would be scaled wrong. Run `arena scan` at the new size.")
-                K, D = load_intrinsics(intrinsics_path(cfg, i), cam.size)
+                if calibration.get("device") and not same_device(calibration["device"], cam.device):
+                    raise SystemExit(
+                        f"{hpath} was fitted for {calibration['device']}, but camera {i} is now "
+                        f"{cam.device}: the camera list changed order. Run `arena scan`.")
+                K, D = load_intrinsics(intrinsics_path(cfg, i), cam.size, cam.device)
             # full_frame_every_s=None: the periodic whole-frame audit (duplicate
             # tags, bumped camera) runs on the audit thread instead of stalling
             # one frame in thirty on the hot path.
@@ -449,6 +456,7 @@ class VisionService:
         with self.lock:
             fused = dict(self.last_fused)
             share = {vid: dict(s) for vid, s in self.fused_share.items()}
+            spread = dict(self.fuser.spread)
             fused_vis = {vid: list(v) for vid, v in self.fused_vis.items()}
         for vid in self.vehicle_ids:
             pose = fused.get(vid)
@@ -460,6 +468,7 @@ class VisionService:
                 "h": None if pose is None else round(pose[2], 4),
                 "vis": round(100.0 * sum(vis) / len(vis), 1) if vis else 0.0,
                 "cams": {str(c): round(w, 2) for c, w in share.get(vid, {}).items()},
+                "spread_cm": None if vid not in spread else round(100.0 * spread[vid], 1),
             })
         statuses = [s.source.status if s.source is not None else "starting" for s in slots]
         stalled = [s for s in slots if s.source is not None and time.perf_counter() - (s.frame_times[-1] if s.frame_times else 0) > 1.0]
@@ -536,6 +545,8 @@ class VisionService:
             with self.lock:
                 fv = " ".join(f"{self.roles[v]}:{100.0 * sum(self.fused_vis[v]) / max(len(self.fused_vis[v]), 1):.0f}%"
                               for v in self.vehicle_ids)
-            self.log(f"fused: seen {fv} | sent {self.sent} suppressed {self.suppressed}")
+                apart = " ".join(f"{self.roles[v]}:{100.0 * d:.1f}cm" for v, d in self.fuser.spread.items())
+            self.log(f"fused: seen {fv} | sent {self.sent} suppressed {self.suppressed}"
+                     + (f" | cameras apart {apart}" if apart else ""))
         else:
             self.log(f"sent {self.sent} suppressed {self.suppressed}")

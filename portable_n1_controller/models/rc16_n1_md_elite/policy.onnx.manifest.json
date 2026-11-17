@@ -1,0 +1,63 @@
+{
+ "runtime": "rc16_n1_v1",
+ "model": "rc16_n1_md_elite",
+ "num_pursuers": 1,
+ "input_dim": 16,
+ "action_dim": 2,
+ "opset": 17,
+ "use_car_cameras": false,
+ "control_dt_s": 0.1,
+ "onnx": {
+  "input": {
+   "observations": [
+    1,
+    16
+   ]
+  },
+  "outputs": {
+   "actions": [
+    1,
+    2
+   ]
+  },
+  "scaler_baked_in": true,
+  "output": "mean action (pre-clip); the runtime clips to [-1, 1]"
+ },
+ "observation": {
+  "top_speed_mps": 2.68224,
+  "arena_half_m": 1.2191999999999998,
+  "arena_side_m": 2.4383999999999997,
+  "max_steer_rad": 0.5235987755982988,
+  "deadband": 0.05,
+  "steer_step_rad": 0.6,
+  "yaw_rate_scale": 10.0
+ },
+ "arena": {
+  "half_w": 1.2191999999999998,
+  "half_h": 1.2191999999999998,
+  "out_margin_m": 0.3,
+  "note": "2.4384 m (8 ft) square, origin at the centre, +x right, +y up, yaw CCW from +x"
+ },
+ "capture_radius_m": 0.35,
+ "catch_hold_steps": 3,
+ "actuation": {
+  "throttle": "throttle command in [-1, 1], + forward. The firmware multiplies it by its `limit` (duty = |throttle| x limit); the model was trained with a command of 1.0 reaching 2.68 m/s, so set `limit` on each car until full command reads that speed (sim duty 0.37). Zero throttle COASTS; the model brakes by commanding reverse.",
+  "steer": "proportional steering target, fraction of max_steer_rad, + left",
+  "trained_with": "proportional servo steering, 50% of episodes with a one-step (0.1 s) command delay; observations through the two-corner-camera emulator"
+ },
+ "deploy_throttle_limit": 1.0,
+ "car": {
+  "model": "MotorDayz 1:16 MD Elite (R8-16CTRKIT1), Corvette body, grip tyres, 4WD",
+  "length_m": 0.29209999999999997,
+  "width_m": 0.127,
+  "mass_kg": 0.68,
+  "max_steer_deg": 30.0,
+  "sim_capped_top_speed_mps": 2.68,
+  "sim_brake_mps2": 4.8,
+  "sim_coast_mps2": 0.8,
+  "sim_min_radius_m": 0.302
+ },
+ "source_checkpoint": "artifacts\\rc16\\runs\\stage_n1\\n1d\\checkpoints\\final.pt",
+ "verified_max_abs_error_vs_torch": 1.9073486328125e-06,
+ "notes": "Pose inputs only: (x, y, heading) per car from the cameras; signed speed from consecutive poses (the loop's SignedSpeed); yaw rate, steering target and last command are tracked inside the runtime."
+}

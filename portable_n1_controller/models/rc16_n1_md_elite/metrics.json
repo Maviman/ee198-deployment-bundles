@@ -1,0 +1,83 @@
+{
+ "model": "rc16_n1_md_elite",
+ "evaluations": {
+  "n1d_emu": {
+   "name": "n1d_emu",
+   "checkpoint": "artifacts/rc16/runs/stage_n1/n1d/checkpoints/final.pt",
+   "camera_source": "emulator",
+   "randomized": false,
+   "episodes": 256,
+   "scaler_in_checkpoint": true,
+   "catch_rate": 1.0,
+   "catch_rate_ci95": 0.0,
+   "pursuer_out_rate": 0.0,
+   "evader_out_rate": 0.0,
+   "timeout_rate": 0.0,
+   "catch_time_s_mean": 1.4023439004085958,
+   "rams_per_episode": 0.21484375,
+   "moving_evader": {
+    "n": 189,
+    "catch_rate": 1.0,
+    "pursuer_out_rate": 0.0
+   },
+   "static_evader": {
+    "n": 67,
+    "catch_rate": 1.0,
+    "pursuer_out_rate": 0.0
+   },
+   "definitions": "catch          centre distance <= 0.35 m for 3 consecutive control steps (0.3 s)  (ChaseEnvCfg)\n    pursuer out    the pursuer's centre > 0.30 m beyond the tape, or flipped\n    evader out     the evader's centre > 0.30 m beyond the tape (with no catch or pursuer out first)\n    ram            body contact (separating-axis gap < 1 cm) while the pursuer's own speed toward the evader > 0.3 m/s"
+  },
+  "n1d_truth": {
+   "name": "n1d_truth",
+   "checkpoint": "artifacts/rc16/runs/stage_n1/n1d/checkpoints/final.pt",
+   "camera_source": "truth",
+   "randomized": false,
+   "episodes": 256,
+   "scaler_in_checkpoint": true,
+   "catch_rate": 1.0,
+   "catch_rate_ci95": 0.0,
+   "pursuer_out_rate": 0.0,
+   "evader_out_rate": 0.0,
+   "timeout_rate": 0.0,
+   "catch_time_s_mean": 1.4925782401114702,
+   "rams_per_episode": 0.16796875,
+   "moving_evader": {
+    "n": 183,
+    "catch_rate": 1.0,
+    "pursuer_out_rate": 0.0
+   },
+   "static_evader": {
+    "n": 73,
+    "catch_rate": 1.0,
+    "pursuer_out_rate": 0.0
+   },
+   "definitions": "catch          centre distance <= 0.35 m for 3 consecutive control steps (0.3 s)  (ChaseEnvCfg)\n    pursuer out    the pursuer's centre > 0.30 m beyond the tape, or flipped\n    evader out     the evader's centre > 0.30 m beyond the tape (with no catch or pursuer out first)\n    ram            body contact (separating-axis gap < 1 cm) while the pursuer's own speed toward the evader > 0.3 m/s"
+  },
+  "n1d_emu_rand": {
+   "name": "n1d_emu_rand",
+   "checkpoint": "artifacts/rc16/runs/stage_n1/n1d/checkpoints/final.pt",
+   "camera_source": "emulator",
+   "randomized": true,
+   "episodes": 256,
+   "scaler_in_checkpoint": true,
+   "catch_rate": 1.0,
+   "catch_rate_ci95": 0.0,
+   "pursuer_out_rate": 0.0,
+   "evader_out_rate": 0.0,
+   "timeout_rate": 0.0,
+   "catch_time_s_mean": 1.4476563641801476,
+   "rams_per_episode": 0.42578125,
+   "moving_evader": {
+    "n": 181,
+    "catch_rate": 1.0,
+    "pursuer_out_rate": 0.0
+   },
+   "static_evader": {
+    "n": 75,
+    "catch_rate": 1.0,
+    "pursuer_out_rate": 0.0
+   },
+   "definitions": "catch          centre distance <= 0.35 m for 3 consecutive control steps (0.3 s)  (ChaseEnvCfg)\n    pursuer out    the pursuer's centre > 0.30 m beyond the tape, or flipped\n    evader out     the evader's centre > 0.30 m beyond the tape (with no catch or pursuer out first)\n    ram            body contact (separating-axis gap < 1 cm) while the pursuer's own speed toward the evader > 0.3 m/s"
+  }
+ }
+}

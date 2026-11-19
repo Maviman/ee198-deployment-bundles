@@ -10,4 +10,9 @@ hive_commander_v1.py  the hive role commander (3 pursuers). An UNMODIFIED copy o
                       manifests have no table and keep the legacy one. Re-copy it whole when the
                       training side changes it; never edit it here. Each model's golden_vectors.json,
                       replayed by selftest.py, pins it.
+
+rc16_hive_v1.py      the three-pursuer playbook commander (models/rc16_hive_*). A copy of AI Training
+                      rc16/deploy/hive_runtime.py; rc16_hive_lib/ is a verbatim copy of the rc16 training
+                      code it runs (rc16/specs.py, rc16/hive/*.py). NEEDS TORCH (CPU): pip install torch.
+                      Re-copy both whole when the training side changes; never edit them here.
 """

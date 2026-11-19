@@ -167,6 +167,8 @@ the other tags.
 
 ```bash
 ./arena fleet                                         # count, model, tag -> CAR_INDEX, installed models
+./arena fleet --pursuers 3 --model models/rc16_hive_h2      # 3 MD Elite cars, playbook commander (needs torch)
+./arena fleet --pursuers 3 --model models/rc16_hive_b       # same, model B: all three cars must close in
 ./arena fleet --pursuers 3 --model models/c38_8ft_buttons   # 3 cars, from now on (8 x 8 ft arena)
 ./arena fleet --pursuers 1 --model models/n1_catch        # back to the locked default
 ./arena up --model models/<name>                      # one session; the count follows the model

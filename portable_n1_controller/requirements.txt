@@ -8,3 +8,6 @@ pyserial>=3.5
 # Only for a car on Bluetooth LE (--esp ble:<name or address>). Imported lazily
 # like pyserial; a controller that never uses BLE runs fine without it.
 bleak>=0.21
+# Only for the 3-car playbook models (models/rc16_hive_*, runtime rc16_hive_v1): the plays and
+# drivers are the training code and run on torch (CPU build is enough). Imported only when such a model loads.
+# torch>=2.0

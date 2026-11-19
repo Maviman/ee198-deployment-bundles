@@ -1,0 +1,1166 @@
+{
+ "model": "rc16_hive_b",
+ "evaluations": {
+  "hive_h3_commander": {
+   "name": "hive_h3_commander",
+   "mode": "commander",
+   "checkpoint": "artifacts/rc16/runs/stage_h/h3/checkpoints/final.pt",
+   "fixed_choice": null,
+   "blank_memory": false,
+   "camera_source": "emulator",
+   "evader_difficulty": 0.5,
+   "evader_static_frac": 0.0,
+   "g_scale": 1.0,
+   "hold_steps": 10,
+   "tape_wall": true,
+   "min_near": 3,
+   "seed": 123,
+   "delay_frac": 0.5,
+   "random_switch_prob": 1.0,
+   "reward_cfg": {
+    "gamma": 0.99,
+    "win_bonus": 10.0,
+    "time_cost": 0.01,
+    "pushed_cost": 12.0,
+    "escape_cost": 8.0,
+    "flip_cost": 10.0,
+    "pawn_outside_cost": 0.2,
+    "pawn_outside_cap_s": 1.0,
+    "ram_cost": 0.5,
+    "ram_speed_mps": 0.5,
+    "shaping_weight": 1.0
+   },
+   "num_envs": 256,
+   "episodes": 256,
+   "quota_per_env": 1,
+   "policy_check": {
+    "max_abs_logit_diff": 0.0,
+    "argmax_agreement": 1.0
+   },
+   "scaler_in_checkpoint": true,
+   "rates": {
+    "win": {
+     "rate": 0.25390625,
+     "n": 65,
+     "ci95": [
+      0.20449781341092277,
+      0.31059137938961423
+     ]
+    },
+    "pushed": {
+     "rate": 0.0,
+     "n": 0,
+     "ci95": [
+      0.0,
+      0.014784391721725852
+     ]
+    },
+    "escape": {
+     "rate": 0.0,
+     "n": 0,
+     "ci95": [
+      0.0,
+      0.014784391721725852
+     ]
+    },
+    "flip": {
+     "rate": 0.0,
+     "n": 0,
+     "ci95": [
+      0.0,
+      0.014784391721725852
+     ]
+    },
+    "time_out": {
+     "rate": 0.74609375,
+     "n": 191,
+     "ci95": [
+      0.6894086206103858,
+      0.7955021865890772
+     ]
+    }
+   },
+   "rates_moving_evader": {
+    "episodes": 256,
+    "win": {
+     "rate": 0.25390625,
+     "n": 65,
+     "ci95": [
+      0.20449781341092277,
+      0.31059137938961423
+     ]
+    },
+    "pushed": {
+     "rate": 0.0,
+     "n": 0,
+     "ci95": [
+      0.0,
+      0.014784391721725852
+     ]
+    },
+    "escape": {
+     "rate": 0.0,
+     "n": 0,
+     "ci95": [
+      0.0,
+      0.014784391721725852
+     ]
+    },
+    "flip": {
+     "rate": 0.0,
+     "n": 0,
+     "ci95": [
+      0.0,
+      0.014784391721725852
+     ]
+    },
+    "time_out": {
+     "rate": 0.74609375,
+     "n": 191,
+     "ci95": [
+      0.6894086206103858,
+      0.7955021865890772
+     ]
+    },
+    "rams_per_episode": 0.11328125,
+    "pawn_outside_s_per_episode": 0.048046874999999996
+   },
+   "rates_static_evader": {
+    "episodes": 0,
+    "win": {
+     "rate": 0.0,
+     "n": 0,
+     "ci95": [
+      0.0,
+      1.0
+     ]
+    },
+    "pushed": {
+     "rate": 0.0,
+     "n": 0,
+     "ci95": [
+      0.0,
+      1.0
+     ]
+    },
+    "escape": {
+     "rate": 0.0,
+     "n": 0,
+     "ci95": [
+      0.0,
+      1.0
+     ]
+    },
+    "flip": {
+     "rate": 0.0,
+     "n": 0,
+     "ci95": [
+      0.0,
+      1.0
+     ]
+    },
+    "time_out": {
+     "rate": 0.0,
+     "n": 0,
+     "ci95": [
+      0.0,
+      1.0
+     ]
+    },
+    "rams_per_episode": 0.0,
+    "pawn_outside_s_per_episode": 0.0
+   },
+   "by_delay": {
+    "delayed": {
+     "episodes": 140,
+     "win": {
+      "rate": 0.17142857142857143,
+      "n": 24,
+      "ci95": [
+       0.11799035294231064,
+       0.24241720648416965
+      ]
+     },
+     "pushed": {
+      "rate": 0.0,
+      "n": 0,
+      "ci95": [
+       0.0,
+       0.02670715564899167
+      ]
+     },
+     "escape": {
+      "rate": 0.0,
+      "n": 0,
+      "ci95": [
+       0.0,
+       0.02670715564899167
+      ]
+     },
+     "flip": {
+      "rate": 0.0,
+      "n": 0,
+      "ci95": [
+       0.0,
+       0.02670715564899167
+      ]
+     },
+     "time_out": {
+      "rate": 0.8285714285714286,
+      "n": 116,
+      "ci95": [
+       0.7575827935158305,
+       0.8820096470576894
+      ]
+     },
+     "rams_per_episode": 0.18571428571428572,
+     "pawn_outside_s_per_episode": 0.08785714285714286
+    },
+    "not_delayed": {
+     "episodes": 116,
+     "win": {
+      "rate": 0.35344827586206895,
+      "n": 41,
+      "ci95": [
+       0.27242847468283177,
+       0.443863697651316
+      ]
+     },
+     "pushed": {
+      "rate": 0.0,
+      "n": 0,
+      "ci95": [
+       0.0,
+       0.03205564678709229
+      ]
+     },
+     "escape": {
+      "rate": 0.0,
+      "n": 0,
+      "ci95": [
+       0.0,
+       0.03205564678709229
+      ]
+     },
+     "flip": {
+      "rate": 0.0,
+      "n": 0,
+      "ci95": [
+       0.0,
+       0.03205564678709229
+      ]
+     },
+     "time_out": {
+      "rate": 0.646551724137931,
+      "n": 75,
+      "ci95": [
+       0.556136302348684,
+       0.7275715253171682
+      ]
+     },
+     "rams_per_episode": 0.02586206896551724,
+     "pawn_outside_s_per_episode": 0.0
+    }
+   },
+   "wins_with_pawn_outside": 0,
+   "wins_by_blockers_0_1_2_3": [
+    0,
+    2,
+    25,
+    38
+   ],
+   "wins_by_near_0_1_2_3": [
+    0,
+    0,
+    0,
+    65
+   ],
+   "wins_by_tape_arcs_0_1to8_9_10to17_18": [
+    7,
+    44,
+    13,
+    1,
+    0
+   ],
+   "win_time_s_mean": 12.716923076923077,
+   "episode_s_mean": 18.150781249999998,
+   "return_mean": 0.4861418129876256,
+   "reward_terms_mean": {
+    "win": 2.5390625,
+    "time": -1.8150774413952604,
+    "pushed": 0.0,
+    "escape": 0.0,
+    "pawn_outside": -0.08984375192085281,
+    "ram": -0.056640625,
+    "flip": 0.0,
+    "shaping": -0.09135844718548469
+   },
+   "switches_per_episode": 8.89453125,
+   "rams_per_episode": 0.11328125,
+   "pawn_outside_s_per_episode": 0.048046874999999996,
+   "recoveries_per_episode": 0.1171875,
+   "gave_up_per_episode": 0.0,
+   "blocked_frac_mean": 0.4559781250000003,
+   "blocked_frac_episode_max_mean": 0.9765597656250002,
+   "blocked_frac_max": 1.0,
+   "episodes_reaching_full_block": 0.83984375,
+   "hold_max_ticks_mean": 3.4765625,
+   "hold_max_ticks_max": 10,
+   "boxed_ticks_per_episode": 4.515625,
+   "boxed_not_trying_ticks_per_episode": 0.01953125,
+   "contact_ticks_per_episode": 29.0703125,
+   "hold_starts_per_episode": 0.69140625,
+   "hold_breaks_per_episode": {
+    "unblocked": 0.3671875,
+    "moved": 0.0546875,
+    "not_trying": 0.0,
+    "ram": 0.0,
+    "episode_end": 0.015625
+   },
+   "choice_usage": {
+    "CHASE_FLANK": 0.38369098712446353,
+    "AMBUSH_left": 0.00021459227467811158,
+    "AMBUSH_right": 0.0,
+    "HERD_0": 0.02628755364806867,
+    "HERD_1": 0.0009656652360515021,
+    "HERD_2": 0.013304721030042918,
+    "HERD_3": 0.003648068669527897,
+    "FEINT_left": 0.0,
+    "FEINT_right": 0.0,
+    "NET_0.6": 0.00021459227467811158,
+    "NET_0.4": 0.1861587982832618,
+    "SQUEEZE": 0.34721030042918455,
+    "NET_0.8": 0.0003218884120171674,
+    "REGROUP": 0.03798283261802575
+   },
+   "play_usage": {
+    "CHASE_FLANK": 0.38369098712446353,
+    "AMBUSH": 0.00021459227467811158,
+    "HERD": 0.04420600858369099,
+    "FEINT": 0.0,
+    "NET": 0.18669527896995705,
+    "SQUEEZE": 0.34721030042918455,
+    "REGROUP": 0.03798283261802575
+   },
+   "plays_with_10pct": 3,
+   "play_usage_max": 0.38369098712446353,
+   "switch_rate_by_running_play_outcome": {
+    "progressed": {
+     "allowed_decisions": 4375,
+     "switched": 1026,
+     "switch_rate": 0.2345142857142857,
+     "ci95": [
+      0.21886069240975534,
+      0.251746269345107
+     ],
+     "ci95_pooled_wilson": [
+      0.2221954444474687,
+      0.24729895334029328
+     ],
+     "episodes_with_such_a_decision": 256
+    },
+    "stalled": {
+     "allowed_decisions": 1103,
+     "switched": 317,
+     "switch_rate": 0.2873980054397099,
+     "ci95": [
+      0.2614937672389315,
+      0.31476569211173316
+     ],
+     "ci95_pooled_wilson": [
+      0.26146454950916365,
+      0.3148072494546629
+     ],
+     "episodes_with_such_a_decision": 229
+    },
+    "broke_down": {
+     "allowed_decisions": 1368,
+     "switched": 825,
+     "switch_rate": 0.6030701754385965,
+     "ci95": [
+      0.5725891120675912,
+      0.6360031720856463
+     ],
+     "ci95_pooled_wilson": [
+      0.5768891720899565,
+      0.6286739191590625
+     ],
+     "episodes_with_such_a_decision": 246
+    }
+   }
+  },
+  "hive_h2_commander_n3": {
+   "name": "hive_h2_commander_n3",
+   "mode": "commander",
+   "checkpoint": "artifacts/rc16/runs/stage_h/h2/checkpoints/final.pt",
+   "fixed_choice": null,
+   "blank_memory": false,
+   "camera_source": "emulator",
+   "evader_difficulty": 0.5,
+   "evader_static_frac": 0.0,
+   "g_scale": 1.0,
+   "hold_steps": 10,
+   "tape_wall": true,
+   "min_near": 3,
+   "seed": 123,
+   "delay_frac": 0.5,
+   "random_switch_prob": 1.0,
+   "reward_cfg": {
+    "gamma": 0.99,
+    "win_bonus": 10.0,
+    "time_cost": 0.01,
+    "pushed_cost": 12.0,
+    "escape_cost": 8.0,
+    "flip_cost": 10.0,
+    "pawn_outside_cost": 0.2,
+    "pawn_outside_cap_s": 1.0,
+    "ram_cost": 0.5,
+    "ram_speed_mps": 0.5,
+    "shaping_weight": 1.0
+   },
+   "num_envs": 256,
+   "episodes": 256,
+   "quota_per_env": 1,
+   "policy_check": null,
+   "scaler_in_checkpoint": true,
+   "rates": {
+    "win": {
+     "rate": 0.19140625,
+     "n": 49,
+     "ci95": [
+      0.1479166280119583,
+      0.24402061375379444
+     ]
+    },
+    "pushed": {
+     "rate": 0.0,
+     "n": 0,
+     "ci95": [
+      0.0,
+      0.014784391721725852
+     ]
+    },
+    "escape": {
+     "rate": 0.0,
+     "n": 0,
+     "ci95": [
+      0.0,
+      0.014784391721725852
+     ]
+    },
+    "flip": {
+     "rate": 0.0,
+     "n": 0,
+     "ci95": [
+      0.0,
+      0.014784391721725852
+     ]
+    },
+    "time_out": {
+     "rate": 0.80859375,
+     "n": 207,
+     "ci95": [
+      0.7559793862462056,
+      0.8520833719880418
+     ]
+    }
+   },
+   "rates_moving_evader": {
+    "episodes": 256,
+    "win": {
+     "rate": 0.19140625,
+     "n": 49,
+     "ci95": [
+      0.1479166280119583,
+      0.24402061375379444
+     ]
+    },
+    "pushed": {
+     "rate": 0.0,
+     "n": 0,
+     "ci95": [
+      0.0,
+      0.014784391721725852
+     ]
+    },
+    "escape": {
+     "rate": 0.0,
+     "n": 0,
+     "ci95": [
+      0.0,
+      0.014784391721725852
+     ]
+    },
+    "flip": {
+     "rate": 0.0,
+     "n": 0,
+     "ci95": [
+      0.0,
+      0.014784391721725852
+     ]
+    },
+    "time_out": {
+     "rate": 0.80859375,
+     "n": 207,
+     "ci95": [
+      0.7559793862462056,
+      0.8520833719880418
+     ]
+    },
+    "rams_per_episode": 0.12890625,
+    "pawn_outside_s_per_episode": 0.024999999999999998
+   },
+   "rates_static_evader": {
+    "episodes": 0,
+    "win": {
+     "rate": 0.0,
+     "n": 0,
+     "ci95": [
+      0.0,
+      1.0
+     ]
+    },
+    "pushed": {
+     "rate": 0.0,
+     "n": 0,
+     "ci95": [
+      0.0,
+      1.0
+     ]
+    },
+    "escape": {
+     "rate": 0.0,
+     "n": 0,
+     "ci95": [
+      0.0,
+      1.0
+     ]
+    },
+    "flip": {
+     "rate": 0.0,
+     "n": 0,
+     "ci95": [
+      0.0,
+      1.0
+     ]
+    },
+    "time_out": {
+     "rate": 0.0,
+     "n": 0,
+     "ci95": [
+      0.0,
+      1.0
+     ]
+    },
+    "rams_per_episode": 0.0,
+    "pawn_outside_s_per_episode": 0.0
+   },
+   "by_delay": {
+    "delayed": {
+     "episodes": 140,
+     "win": {
+      "rate": 0.1357142857142857,
+      "n": 19,
+      "ci95": [
+       0.08863403938424923,
+       0.20225260258858757
+      ]
+     },
+     "pushed": {
+      "rate": 0.0,
+      "n": 0,
+      "ci95": [
+       0.0,
+       0.02670715564899167
+      ]
+     },
+     "escape": {
+      "rate": 0.0,
+      "n": 0,
+      "ci95": [
+       0.0,
+       0.02670715564899167
+      ]
+     },
+     "flip": {
+      "rate": 0.0,
+      "n": 0,
+      "ci95": [
+       0.0,
+       0.02670715564899167
+      ]
+     },
+     "time_out": {
+      "rate": 0.8642857142857143,
+      "n": 121,
+      "ci95": [
+       0.7977473974114125,
+       0.9113659606157508
+      ]
+     },
+     "rams_per_episode": 0.2357142857142857,
+     "pawn_outside_s_per_episode": 0.04571428571428571
+    },
+    "not_delayed": {
+     "episodes": 116,
+     "win": {
+      "rate": 0.25862068965517243,
+      "n": 30,
+      "ci95": [
+       0.1875795035792947,
+       0.3451370155593016
+      ]
+     },
+     "pushed": {
+      "rate": 0.0,
+      "n": 0,
+      "ci95": [
+       0.0,
+       0.03205564678709229
+      ]
+     },
+     "escape": {
+      "rate": 0.0,
+      "n": 0,
+      "ci95": [
+       0.0,
+       0.03205564678709229
+      ]
+     },
+     "flip": {
+      "rate": 0.0,
+      "n": 0,
+      "ci95": [
+       0.0,
+       0.03205564678709229
+      ]
+     },
+     "time_out": {
+      "rate": 0.7413793103448276,
+      "n": 86,
+      "ci95": [
+       0.6548629844406985,
+       0.8124204964207052
+      ]
+     },
+     "rams_per_episode": 0.0,
+     "pawn_outside_s_per_episode": 0.0
+    }
+   },
+   "wins_with_pawn_outside": 0,
+   "wins_by_blockers_0_1_2_3": [
+    0,
+    1,
+    17,
+    31
+   ],
+   "wins_by_near_0_1_2_3": [
+    0,
+    0,
+    0,
+    49
+   ],
+   "wins_by_tape_arcs_0_1to8_9_10to17_18": [
+    6,
+    31,
+    12,
+    0,
+    0
+   ],
+   "win_time_s_mean": 12.932653061224492,
+   "episode_s_mean": 18.647265625000003,
+   "return_mean": -0.15261684311553836,
+   "reward_terms_mean": {
+    "win": 1.9140625,
+    "time": -1.8647258384153247,
+    "pushed": 0.0,
+    "escape": 0.0,
+    "pawn_outside": -0.05000000091968104,
+    "ram": -0.064453125,
+    "flip": 0.0,
+    "shaping": -0.08749994289246388
+   },
+   "switches_per_episode": 9.64453125,
+   "rams_per_episode": 0.12890625,
+   "pawn_outside_s_per_episode": 0.024999999999999998,
+   "recoveries_per_episode": 0.0859375,
+   "gave_up_per_episode": 0.0,
+   "blocked_frac_mean": 0.4369707031249996,
+   "blocked_frac_episode_max_mean": 0.9730882812500004,
+   "blocked_frac_max": 1.0,
+   "episodes_reaching_full_block": 0.83984375,
+   "hold_max_ticks_mean": 3.046875,
+   "hold_max_ticks_max": 10,
+   "boxed_ticks_per_episode": 3.578125,
+   "boxed_not_trying_ticks_per_episode": 0.0,
+   "contact_ticks_per_episode": 29.296875,
+   "hold_starts_per_episode": 0.5625,
+   "hold_breaks_per_episode": {
+    "unblocked": 0.28125,
+    "moved": 0.0546875,
+    "not_trying": 0.0,
+    "ram": 0.0,
+    "episode_end": 0.03515625
+   },
+   "choice_usage": {
+    "CHASE_FLANK": 0.3844305120167189,
+    "AMBUSH_left": 0.0,
+    "AMBUSH_right": 0.0,
+    "HERD_0": 0.027586206896551724,
+    "HERD_1": 0.008672936259143156,
+    "HERD_2": 0.005851619644723093,
+    "HERD_3": 0.009299895506792059,
+    "FEINT_left": 0.0,
+    "FEINT_right": 0.0,
+    "NET_0.6": 0.0,
+    "NET_0.4": 0.19007314524555904,
+    "SQUEEZE": 0.3614420062695925,
+    "NET_0.8": 0.0,
+    "REGROUP": 0.01264367816091954
+   },
+   "play_usage": {
+    "CHASE_FLANK": 0.3844305120167189,
+    "AMBUSH": 0.0,
+    "HERD": 0.05141065830721003,
+    "FEINT": 0.0,
+    "NET": 0.19007314524555904,
+    "SQUEEZE": 0.3614420062695925,
+    "REGROUP": 0.01264367816091954
+   },
+   "plays_with_10pct": 3,
+   "play_usage_max": 0.3844305120167189,
+   "switch_rate_by_running_play_outcome": {
+    "progressed": {
+     "allowed_decisions": 4050,
+     "switched": 999,
+     "switch_rate": 0.24666666666666667,
+     "ci95": [
+      0.229876545286509,
+      0.26447001689739785
+     ],
+     "ci95_pooled_wilson": [
+      0.23363454727453825,
+      0.2601789258517921
+     ],
+     "episodes_with_such_a_decision": 256
+    },
+    "stalled": {
+     "allowed_decisions": 1252,
+     "switched": 367,
+     "switch_rate": 0.29313099041533547,
+     "ci95": [
+      0.2618448982579417,
+      0.32700902634897455
+     ],
+     "ci95_pooled_wilson": [
+      0.2685797175605209,
+      0.3189478814615214
+     ],
+     "episodes_with_such_a_decision": 239
+    },
+    "broke_down": {
+     "allowed_decisions": 1602,
+     "switched": 929,
+     "switch_rate": 0.579900124843945,
+     "ci95": [
+      0.5530425131945078,
+      0.6081451168647203
+     ],
+     "ci95_pooled_wilson": [
+      0.5555670957104257,
+      0.6038508692993236
+     ],
+     "episodes_with_such_a_decision": 253
+    }
+   }
+  },
+  "hive_b5n3_SQUEEZE": {
+   "name": "hive_b5n3_SQUEEZE",
+   "mode": "fixed",
+   "checkpoint": null,
+   "fixed_choice": {
+    "index": 11,
+    "name": "SQUEEZE"
+   },
+   "blank_memory": false,
+   "camera_source": "emulator",
+   "evader_difficulty": 0.5,
+   "evader_static_frac": 0.0,
+   "g_scale": 1.0,
+   "hold_steps": 10,
+   "tape_wall": true,
+   "min_near": 3,
+   "seed": 123,
+   "delay_frac": 0.5,
+   "random_switch_prob": 1.0,
+   "reward_cfg": {
+    "gamma": 0.99,
+    "win_bonus": 10.0,
+    "time_cost": 0.01,
+    "pushed_cost": 12.0,
+    "escape_cost": 8.0,
+    "flip_cost": 10.0,
+    "pawn_outside_cost": 0.2,
+    "pawn_outside_cap_s": 1.0,
+    "ram_cost": 0.5,
+    "ram_speed_mps": 0.5,
+    "shaping_weight": 1.0
+   },
+   "num_envs": 256,
+   "episodes": 256,
+   "quota_per_env": 1,
+   "policy_check": null,
+   "scaler_in_checkpoint": null,
+   "rates": {
+    "win": {
+     "rate": 0.12890625,
+     "n": 33,
+     "ci95": [
+      0.09328022103441713,
+      0.17550506969655127
+     ]
+    },
+    "pushed": {
+     "rate": 0.0,
+     "n": 0,
+     "ci95": [
+      0.0,
+      0.014784391721725852
+     ]
+    },
+    "escape": {
+     "rate": 0.0,
+     "n": 0,
+     "ci95": [
+      0.0,
+      0.014784391721725852
+     ]
+    },
+    "flip": {
+     "rate": 0.0,
+     "n": 0,
+     "ci95": [
+      0.0,
+      0.014784391721725852
+     ]
+    },
+    "time_out": {
+     "rate": 0.87109375,
+     "n": 223,
+     "ci95": [
+      0.8244949303034488,
+      0.906719778965583
+     ]
+    }
+   },
+   "rates_moving_evader": {
+    "episodes": 256,
+    "win": {
+     "rate": 0.12890625,
+     "n": 33,
+     "ci95": [
+      0.09328022103441713,
+      0.17550506969655127
+     ]
+    },
+    "pushed": {
+     "rate": 0.0,
+     "n": 0,
+     "ci95": [
+      0.0,
+      0.014784391721725852
+     ]
+    },
+    "escape": {
+     "rate": 0.0,
+     "n": 0,
+     "ci95": [
+      0.0,
+      0.014784391721725852
+     ]
+    },
+    "flip": {
+     "rate": 0.0,
+     "n": 0,
+     "ci95": [
+      0.0,
+      0.014784391721725852
+     ]
+    },
+    "time_out": {
+     "rate": 0.87109375,
+     "n": 223,
+     "ci95": [
+      0.8244949303034488,
+      0.906719778965583
+     ]
+    },
+    "rams_per_episode": 0.1953125,
+    "pawn_outside_s_per_episode": 0.028125000000000004
+   },
+   "rates_static_evader": {
+    "episodes": 0,
+    "win": {
+     "rate": 0.0,
+     "n": 0,
+     "ci95": [
+      0.0,
+      1.0
+     ]
+    },
+    "pushed": {
+     "rate": 0.0,
+     "n": 0,
+     "ci95": [
+      0.0,
+      1.0
+     ]
+    },
+    "escape": {
+     "rate": 0.0,
+     "n": 0,
+     "ci95": [
+      0.0,
+      1.0
+     ]
+    },
+    "flip": {
+     "rate": 0.0,
+     "n": 0,
+     "ci95": [
+      0.0,
+      1.0
+     ]
+    },
+    "time_out": {
+     "rate": 0.0,
+     "n": 0,
+     "ci95": [
+      0.0,
+      1.0
+     ]
+    },
+    "rams_per_episode": 0.0,
+    "pawn_outside_s_per_episode": 0.0
+   },
+   "by_delay": {
+    "delayed": {
+     "episodes": 140,
+     "win": {
+      "rate": 0.12142857142857143,
+      "n": 17,
+      "ci95": [
+       0.07721197100643956,
+       0.18586630398493986
+      ]
+     },
+     "pushed": {
+      "rate": 0.0,
+      "n": 0,
+      "ci95": [
+       0.0,
+       0.02670715564899167
+      ]
+     },
+     "escape": {
+      "rate": 0.0,
+      "n": 0,
+      "ci95": [
+       0.0,
+       0.02670715564899167
+      ]
+     },
+     "flip": {
+      "rate": 0.0,
+      "n": 0,
+      "ci95": [
+       0.0,
+       0.02670715564899167
+      ]
+     },
+     "time_out": {
+      "rate": 0.8785714285714286,
+      "n": 123,
+      "ci95": [
+       0.8141336960150601,
+       0.9227880289935605
+      ]
+     },
+     "rams_per_episode": 0.32857142857142857,
+     "pawn_outside_s_per_episode": 0.04571428571428572
+    },
+    "not_delayed": {
+     "episodes": 116,
+     "win": {
+      "rate": 0.13793103448275862,
+      "n": 16,
+      "ci95": [
+       0.08671766101537676,
+       0.21235711769251764
+      ]
+     },
+     "pushed": {
+      "rate": 0.0,
+      "n": 0,
+      "ci95": [
+       0.0,
+       0.03205564678709229
+      ]
+     },
+     "escape": {
+      "rate": 0.0,
+      "n": 0,
+      "ci95": [
+       0.0,
+       0.03205564678709229
+      ]
+     },
+     "flip": {
+      "rate": 0.0,
+      "n": 0,
+      "ci95": [
+       0.0,
+       0.03205564678709229
+      ]
+     },
+     "time_out": {
+      "rate": 0.8620689655172413,
+      "n": 100,
+      "ci95": [
+       0.7876428823074824,
+       0.9132823389846232
+      ]
+     },
+     "rams_per_episode": 0.034482758620689655,
+     "pawn_outside_s_per_episode": 0.006896551724137932
+    }
+   },
+   "wins_with_pawn_outside": 0,
+   "wins_by_blockers_0_1_2_3": [
+    0,
+    0,
+    10,
+    23
+   ],
+   "wins_by_near_0_1_2_3": [
+    0,
+    0,
+    0,
+    33
+   ],
+   "wins_by_tape_arcs_0_1to8_9_10to17_18": [
+    5,
+    25,
+    3,
+    0,
+    0
+   ],
+   "win_time_s_mean": 13.606060606060609,
+   "episode_s_mean": 19.17578125,
+   "return_mean": -0.8454162236303091,
+   "reward_terms_mean": {
+    "win": 1.2890625,
+    "time": -1.9175773616880178,
+    "pushed": 0.0,
+    "escape": 0.0,
+    "pawn_outside": -0.049218749918509275,
+    "ram": -0.09765625,
+    "flip": 0.0,
+    "shaping": -0.07002600308624096
+   },
+   "switches_per_episode": 1.0,
+   "rams_per_episode": 0.1953125,
+   "pawn_outside_s_per_episode": 0.028125000000000004,
+   "recoveries_per_episode": 0.05859375,
+   "gave_up_per_episode": 0.0,
+   "blocked_frac_mean": 0.40301249999999994,
+   "blocked_frac_episode_max_mean": 0.9550753906250007,
+   "blocked_frac_max": 1.0,
+   "episodes_reaching_full_block": 0.7421875,
+   "hold_max_ticks_mean": 1.6953125,
+   "hold_max_ticks_max": 10,
+   "boxed_ticks_per_episode": 1.97265625,
+   "boxed_not_trying_ticks_per_episode": 0.0,
+   "contact_ticks_per_episode": 23.57421875,
+   "hold_starts_per_episode": 0.30859375,
+   "hold_breaks_per_episode": {
+    "unblocked": 0.12890625,
+    "moved": 0.03515625,
+    "not_trying": 0.0,
+    "ram": 0.0,
+    "episode_end": 0.015625
+   },
+   "choice_usage": {
+    "CHASE_FLANK": 0.0,
+    "AMBUSH_left": 0.0,
+    "AMBUSH_right": 0.0,
+    "HERD_0": 0.0,
+    "HERD_1": 0.0,
+    "HERD_2": 0.0,
+    "HERD_3": 0.0,
+    "FEINT_left": 0.0,
+    "FEINT_right": 0.0,
+    "NET_0.6": 0.0,
+    "NET_0.4": 0.0,
+    "SQUEEZE": 1.0,
+    "NET_0.8": 0.0,
+    "REGROUP": 0.0
+   },
+   "play_usage": {
+    "CHASE_FLANK": 0.0,
+    "AMBUSH": 0.0,
+    "HERD": 0.0,
+    "FEINT": 0.0,
+    "NET": 0.0,
+    "SQUEEZE": 1.0,
+    "REGROUP": 0.0
+   },
+   "plays_with_10pct": 1,
+   "play_usage_max": 1.0,
+   "switch_rate_by_running_play_outcome": {
+    "progressed": {
+     "allowed_decisions": 7976,
+     "switched": 0,
+     "switch_rate": 0.0,
+     "ci95": [
+      0.0,
+      0.0
+     ],
+     "ci95_pooled_wilson": [
+      2.710505431213761e-20,
+      0.0004814130646402805
+     ],
+     "episodes_with_such_a_decision": 256
+    },
+    "stalled": {
+     "allowed_decisions": 1163,
+     "switched": 0,
+     "switch_rate": 0.0,
+     "ci95": [
+      0.0,
+      0.0
+     ],
+     "ci95_pooled_wilson": [
+      0.0,
+      0.003292306342180464
+     ],
+     "episodes_with_such_a_decision": 188
+    },
+    "broke_down": {
+     "allowed_decisions": 180,
+     "switched": 0,
+     "switch_rate": 0.0,
+     "ci95": [
+      0.0,
+      0.0
+     ],
+     "ci95_pooled_wilson": [
+      0.0,
+      0.02089624981505818
+     ],
+     "episodes_with_such_a_decision": 90
+    }
+   }
+  }
+ }
+}

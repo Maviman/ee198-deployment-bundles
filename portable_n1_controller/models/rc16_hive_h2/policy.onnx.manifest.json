@@ -1,0 +1,68 @@
+{
+ "runtime": "rc16_hive_v1",
+ "model": "rc16_hive_h2",
+ "num_pursuers": 3,
+ "input_dim": 118,
+ "action_dim": 6,
+ "opset": 17,
+ "use_car_cameras": false,
+ "control_dt_s": 0.1,
+ "decision_dt_s": 0.5,
+ "requires": "torch (CPU) and onnxruntime on the controller: the playbook and drivers are the training code",
+ "onnx": {
+  "input": {
+   "observations": [
+    1,
+    118
+   ]
+  },
+  "outputs": {
+   "logits": [
+    1,
+    15
+   ]
+  },
+  "scaler_baked_in": true,
+  "output": "15 logits; the runtime takes the argmax (0 = keep the play, 1..14 = switch to plays.CHOICES[a - 1])"
+ },
+ "choices": [
+  "CHASE_FLANK",
+  "AMBUSH_left",
+  "AMBUSH_right",
+  "HERD_0",
+  "HERD_1",
+  "HERD_2",
+  "HERD_3",
+  "FEINT_left",
+  "FEINT_right",
+  "NET_0.6",
+  "NET_0.4",
+  "SQUEEZE",
+  "NET_0.8",
+  "REGROUP"
+ ],
+ "tape_wall": true,
+ "min_near": 2,
+ "blank_memory": false,
+ "win_rule": "checkmate: every escape arc of the evader (18 arcs of 0.40 m) is blocked within 0.15 m by a pursuer body or by the tape (leaving the square is not a legal move), at least 2 pursuers have their box within that distance of the evader's box, held 1.0 s while the evader tries to move. The runtime does not judge wins; this is what it was trained for.",
+ "arena": {
+  "half_w": 1.2191999999999998,
+  "half_h": 1.2191999999999998,
+  "out_margin_m": 0.3,
+  "note": "2.4384 m (8 ft) square, origin at the centre, +x right, +y up, yaw CCW from +x"
+ },
+ "actuation": {
+  "throttle": "throttle command in [-1, 1], + forward; firmware duty = |throttle| x `limit`. A full command must reach 2.68 m/s (sim duty 0.37). Zero throttle COASTS; the drivers brake by reverse.",
+  "steer": "proportional steering target, fraction of max steer (30 deg), + left",
+  "trained_with": "two-corner-camera emulator, half the episodes with a 0.1 s command delay"
+ },
+ "deploy_throttle_limit": 1.0,
+ "car": {
+  "model": "MotorDayz 1:16 MD Elite (R8-16CTRKIT1), 4WD, servo",
+  "length_m": 0.29209999999999997,
+  "width_m": 0.127,
+  "max_steer_deg": 30.0
+ },
+ "source_checkpoint": "artifacts\\rc16\\runs\\stage_h\\h2\\checkpoints\\final.pt",
+ "verified_max_abs_error_vs_torch": 1.1444091796875e-05
+}

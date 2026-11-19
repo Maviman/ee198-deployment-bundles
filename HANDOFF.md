@@ -1,3 +1,5 @@
+> **Latest handoff (2026-11-18):** [docs/handoff/2026-11-18-tag-dropouts.md](docs/handoff/2026-11-18-tag-dropouts.md) - runs end when a tag drops out; the discussion, the telemetry and the recommended fixes.
+
 # Handoff — planned camera work
 
 Written 2026-08-21. Two pieces of camera work are coming. Neither is started.

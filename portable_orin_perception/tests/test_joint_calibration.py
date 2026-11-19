@@ -95,9 +95,24 @@ def test_the_evader_and_one_car_are_enough():
         assert worst_error_m(cf.H, TRUTH[slot]) < 0.03, slot
 
 
+def test_shared_corner_tags_alone_fit_with_an_honest_uncertainty():
+    # Only corner tags 11 and 13 in view of both cameras: their four tag corners still pin
+    # the missing corners, weakly at this tag size. The fit runs and SAYS it is weak (the
+    # scan fails anything over 5 cm), and the error it states is the error it has.
+    for seed in range(3):
+        fit = fit_joint(views(scene({}), seed=seed), P, half=HALF, corner_ids=set(P))
+        assert fit.ok, fit.error
+        for slot, cf in fit.cameras.items():
+            assert cf.uncertainty_m > 0.02, "never claims OK from small corner tags alone"
+            assert worst_error_m(cf.H, TRUTH[slot]) < 2.0 * cf.uncertainty_m, (seed, slot)
+
+
 def test_no_tag_in_view_of_both_cameras_is_refused():
-    fit = fit_joint(views(scene({})), P, half=HALF, corner_ids=set(P))
-    assert not fit.ok and "both cameras" in fit.error
+    v = views(scene({}))
+    v = [CameraView(x.slot, x.corners_px, {t: tv for t, tv in x.tags.items() if t not in (11, 13)})
+         for x in v]
+    fit = fit_joint(v, P, half=HALF, corner_ids=set(P))
+    assert not fit.ok and "two cameras" in fit.error
 
 
 def test_a_corner_no_camera_sees_is_refused():

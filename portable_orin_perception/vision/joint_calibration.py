@@ -331,10 +331,15 @@ def fit_joint(views: list, points: dict, *, half: tuple[float, float],
     n_eq = sum(2 * (len(obs) - 1) for _, _, obs in pb.shared)
 
     if pb.order:
-        non_corner = [t for t in by_tag if len(by_tag[t]) >= 2 and t not in corner_ids]
-        if not non_corner:
+        # What ties the cameras together is every tag corner both see. A shared CORNER tag's
+        # centre is exact for both cameras by construction, but its four corners still pin the
+        # missing corner, more firmly the bigger the tag: 20 px corner tags did not (Nov 12),
+        # 35-90 px ones may (Nov 18). So no blanket refusal: the uncertainty estimate below
+        # (and the scan's 2 / 5 cm verdict on it) decides whether what is shared is enough.
+        shared_any = [t for t in by_tag if len(by_tag[t]) >= 2]
+        if not shared_any:
             return JointFit(cams, [], n_params, n_eq,
-                            error="no floor tag is in view of two cameras: lay the evader or a spare tag "
+                            error="no tag is in view of two cameras: lay the evader or a spare tag "
                                   "flat where both cameras see it (the band between the side corner tags)")
         if _start is not None:
             starts = [np.asarray(_start, dtype=np.float64)]

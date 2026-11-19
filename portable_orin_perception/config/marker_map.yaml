@@ -47,6 +47,10 @@ evader_id: 0
 # as if this list were cut to N. Run by hand without --pursuers, all are tracked.
 pursuer_ids: [1, 2, 3]
 calibration_corner_ids: [10, 11, 12, 13]
+# Printed size of the BLACK square (not the paper), metres. The corner tags are 10 in sheets with a
+# 16 cm black square (ruler, 2026-11-18; both cameras measured 15.9-16.1 cm). The joint calibration
+# weights each tag corner by it, and the scan checks the arena scale against it.
+corner_tag_m: 0.16
 
 # Sheets to PRINT but never track (spares). None right now: every printed
 # vehicle sheet is in the fleet above.

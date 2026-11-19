@@ -384,8 +384,9 @@ class Hub:
         now = time.time()
         checks: list[dict] = []
 
-        def chk(name, ok, detail=""):
-            checks.append({"name": name, "ok": bool(ok), "detail": detail})
+        def chk(name, ok, detail="", advisory=False):
+            # advisory: shown (amber on the page) but never blocks START
+            checks.append({"name": name, "ok": bool(ok), "detail": detail, "advisory": advisory})
 
         c, v = self.latest.get("control"), self.latest.get("vision")
         c_age = now - self.rx_at.get("control", 0)
@@ -430,8 +431,12 @@ class Hub:
             chk("car starts inside the arena", inside, f"at ({px:.2f}, {py:.2f})")
             near_edge = max(abs(px), abs(py)) >= EDGE_FACING_M
             inward = (px * math.cos(h) + py * math.sin(h)) < 0
+            # Advisory only (operator's call, 2026-11-18): any start pose is allowed. A car facing
+            # out near the tape may drive out first; the run watchdog disarms it at the edge.
             chk("car faces inward if it starts near an edge", (not near_edge) or inward,
-                "" if not near_edge or inward else f"at ({px:.2f}, {py:.2f}) facing outward")
+                "" if not near_edge or inward else
+                f"at ({px:.2f}, {py:.2f}) facing outward: allowed, the watchdog stops it at the tape",
+                advisory=True)
             cmd = c.get("cmd") or [0.0, 0.0]
             ang = (math.atan2(ey - py, ex - px) - h + math.pi) % (2 * math.pi) - math.pi
             ok_sign = abs(ang) < math.radians(30) or abs(cmd[1]) < 0.2 or ((cmd[1] > 0) == (ang > 0))
@@ -441,7 +446,7 @@ class Hub:
                                    f"{'left' if cmd[1] > 0 else 'right'}: mirrored calibration?")
         else:
             chk("car and evader poses are flowing", False, "no poses yet")
-        return {"ok": all(x["ok"] for x in checks), "checks": checks,
+        return {"ok": all(x["ok"] or x.get("advisory") for x in checks), "checks": checks,
                 "hold_radius": (c or {}).get("hold_radius")}
 
     def arm(self) -> tuple[int, dict]:

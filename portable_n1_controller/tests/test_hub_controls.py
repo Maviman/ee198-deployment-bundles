@@ -151,7 +151,6 @@ def test_a_healthy_system_is_ready(rig):
     (lambda r: r.control.update(state="STALLED", stall_reason="no pose frames"), "controller is RUNNING and disarmed"),
     (lambda r: r.control["lat_ms"]["total"].update(p95=180.0), "camera to command latency within budget"),
     (lambda r: r.control["poses"].update(pursuers=[[0.88, 0.0, 1.5708]]), "car starts inside the arena"),
-    (lambda r: r.control["poses"].update(pursuers=[[0.75, 0.0, 0.0]]), "car faces inward if it starts near an edge"),
     (lambda r: r.control.update(cmd=[1.0, -1.0]), "steering sign agrees with the evader's side (frame not mirrored)"),
     (lambda r: r.vision.update(drift_px=40.0), "no error alerts"),
 ])
@@ -567,3 +566,14 @@ def test_a_controller_refusal_comes_back_as_409(rig, monkeypatch):
                                                          "error": "the policy is driving (ARMED): press STOP first"})
     code, body = r.post("/api/manual", data={"thr": 1})
     assert code == 409 and "ARMED" in body["error"]
+
+
+
+def test_facing_outward_near_the_edge_is_shown_but_does_not_block_start(rig):
+    r = rig()
+    r.control["poses"].update(pursuers=[[0.75, 0.0, 0.0]])
+    time.sleep(0.3)
+    rd = r.hub.readiness()
+    chk = next(c for c in rd["checks"] if c["name"].startswith("car faces inward"))
+    assert chk["ok"] is False and chk["advisory"] is True and "allowed" in chk["detail"]
+    assert rd["ok"] is True, "any start pose is the operator's call"

@@ -37,6 +37,7 @@
   .checks { font: 12px var(--mono); display: grid; gap: 3px; }
   .checks .c-ok::before { content: "\2713  "; color: var(--ok); }
   .checks .c-bad::before { content: "\2717  "; color: var(--err); }
+  .c-warn { color: var(--warn); }
   .checks .d { color: var(--dim); }
   #initlog { font: 11px var(--mono); color: var(--dim); max-height: 150px; overflow: auto; white-space: pre-wrap; margin-top: 6px; }
   #scanshot { display: none; margin-top: 8px; }
@@ -683,7 +684,7 @@ function render() {
     : "Lock the shortest exposure the light allows, then re-fit the arena frame from the four corner tags "
       + "(arena scan --tune-exposure; the car is disarmed and the camera service paused), then restart the camera service";
   $("checks").innerHTML = (rd.checks || []).map((x) =>
-    `<div class="${x.ok ? "c-ok" : "c-bad"}">${x.name}${x.detail ? ` <span class="d">— ${x.detail}</span>` : ""}</div>`).join("")
+    `<div class="${x.ok ? "c-ok" : x.advisory ? "c-warn" : "c-bad"}">${x.name}${x.detail ? ` <span class="d">— ${x.detail}</span>` : ""}</div>`).join("")
     || `<div class="sub">no data</div>`;
   $("readysub").textContent = armedNow ? "ARMED" : rd.ok ? "all green" : "not ready";
   $("readysub").className = "sub " + (armedNow ? "ok" : rd.ok ? "ok" : "warn");

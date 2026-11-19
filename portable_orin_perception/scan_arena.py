@@ -631,8 +631,11 @@ def report_agreement(rep: Report, scans, corner_ids, mm_detect, mode: str, share
         views = [CameraView(sc.slot, {}, _tag_views(sc, mm_detect.all_ids, mm_detect)) for sc in scans]
         shared = agreement({sc.slot: sc.H for sc in scans}, views, skip_ids=set(corner_ids))
     if not shared:
-        rep.add(WARN if mode == "check" else FAIL, "cameras agree",
-                "no floor tag (evader, spare) is in view of two cameras: nothing to compare")
+        # Not a FAIL: the joint fit's own uncertainty already judged whether the shared tags
+        # (corner tags included) pin the cameras; this check only has nothing extra to add.
+        rep.add(WARN, "cameras agree",
+                "no floor tag (evader, spare) is in view of two cameras, so the two cameras' views of "
+                "the floor are not compared directly; lay one where both see it for that check")
         return
     worst = max(s.spread_m for s in shared)
     level = OK if worst <= AGREE_OK_M else WARN if worst <= AGREE_FAIL_M else FAIL

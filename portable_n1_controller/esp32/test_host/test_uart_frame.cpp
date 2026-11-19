@@ -81,7 +81,7 @@ static void test_leading_blanks_do_not_hide_a_frame() {
 static void test_console_limit_is_unchanged() {
   LineFramer f;
   auto ok = feed(f, std::string(MAX_CONSOLE, 'x') + "\n");
-  CHECK(ok.size() == 1 && ok[0].kind == CONSOLE && ok[0].text.size() == MAX_CONSOLE, "47 characters are accepted");
+  CHECK(ok.size() == 1 && ok[0].kind == CONSOLE && ok[0].text.size() == MAX_CONSOLE, "MAX_CONSOLE characters are accepted");
   auto bad = feed(f, std::string(MAX_CONSOLE + 1, 'x') + "\n");
   CHECK(bad.size() == 1 && bad[0].kind == CONSOLE_TOO_LONG, "48 characters are rejected, as the old 48-byte buffer did");
   auto pad = feed(f, std::string(MAX_CONSOLE, ' ') + "idx\n");

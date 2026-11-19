@@ -68,6 +68,12 @@
  *    access point in range still boots and takes UART commands from its first
  *    loop(). UDP and OTA start when WiFi first connects.
  *  - Do not type console commands while a controller holds the port.
+ *  - WHICH NETWORK: `wifi <ssid> <password>` on the console saves a network in
+ *    NVS (it wins over wifi_credentials.h) and reboots; `wifi clear` goes back
+ *    to the compiled one; `wifi` alone shows which is in use. The SSID is
+ *    everything before the last space, so an SSID may contain spaces but the
+ *    password may not. The car asks DHCP for the name hive-car<index>, which is
+ *    how tools/wifi_ap_test.py finds it on the Orin's own access point.
  *  - Opening the port can reset the board (USB-UART adapters assert DTR/RTS,
  *    which drive EN and IO0). Buttons come up released and the 100 k pull-downs
  *    hold them; the controller sends nothing until the probe is answered.
@@ -209,7 +215,7 @@
 #include <ArduinoOTA.h>
 #endif
 
-#define FW_VERSION "2026.11-servo-ramp-uart-ble"
+#define FW_VERSION "2026.11-servo-ramp-uart-ble-wifinvs"
 
 const uint16_t UDP_PORT = 8888;
 
@@ -268,6 +274,10 @@ int carIndex = DEFAULT_CAR_INDEX;
 bool carIndexWasStored = false;
 unsigned long lastSlotWarnMs = 0;
 bool otaEnabled = false;
+// The network to join: NVS (serial `wifi`) when one is saved, else wifi_credentials.h.
+char wifiSsid[33] = "";
+char wifiPass[65] = "";
+bool wifiFromNvs = false;
 
 bool modulated = DEFAULT_MODULATED;
 Radio radio = DEFAULT_RADIO;
@@ -582,6 +592,13 @@ void loadSettings() {
   for (int b = 0; b < 4 && ok; b++)
     for (int c = b + 1; c < 4; c++) ok = ok && p[b] != p[c];
   for (int b = 0; b < 4; b++) pins[b] = ok ? p[b] : DEFAULT_PINS[b];
+  wifiFromNvs = prefs.isKey("wifi_ssid") && prefs.getString("wifi_ssid", wifiSsid, sizeof(wifiSsid)) > 1;
+  if (wifiFromNvs) {
+    if (prefs.getString("wifi_pass", wifiPass, sizeof(wifiPass)) == 0) wifiPass[0] = '\0';
+  } else {
+    strncpy(wifiSsid, WIFI_SSID, sizeof(wifiSsid) - 1);
+    strncpy(wifiPass, WIFI_PASS, sizeof(wifiPass) - 1);
+  }
   int a = prefs.getInt("act", DEFAULT_ACT);
   act = (a == ACT_SERVO) ? ACT_SERVO : ACT_BUTTONS;
   drivePwm = prefs.getBool("drv_pwm", DEFAULT_DRIVE_PWM);
@@ -770,6 +787,38 @@ void handleConsoleLine(char *line) {
     } else {
       printSettings();
     }
+  } else if (strcmp(line, "wifi") == 0) {
+    if (!hasArg) {
+      Serial.printf("wifi network '%s' (%s)\n", wifiSsid,
+                    wifiFromNvs ? "saved with `wifi`" : "wifi_credentials.h");
+    } else if (refusedWhileDriving()) {
+    } else if (strcmp(arg, "clear") == 0) {
+      prefs.remove("wifi_ssid");
+      prefs.remove("wifi_pass");
+      Serial.println("wifi network cleared, back to wifi_credentials.h -- rebooting to apply");
+      Serial.flush();
+      delay(100);
+      ESP.restart();
+    } else {
+      char *sp = strrchr(arg, ' ');
+      size_t ssidLen = sp ? (size_t)(sp - arg) : 0;
+      size_t passLen = sp ? strlen(sp + 1) : 0;
+      while (ssidLen > 0 && arg[ssidLen - 1] == ' ') ssidLen--;
+      if (!sp || ssidLen == 0 || ssidLen > 32 || passLen < 8 || passLen > 63) {
+        Serial.println("REJECTED: wifi <ssid> <password>  (SSID 1..32 chars, WPA2 password 8..63, "
+                       "no spaces in the password) | wifi clear");
+      } else {
+        char ssid[33];
+        memcpy(ssid, arg, ssidLen);
+        ssid[ssidLen] = '\0';
+        prefs.putString("wifi_ssid", ssid);
+        prefs.putString("wifi_pass", sp + 1);
+        Serial.printf("wifi network set to '%s' (saved) -- rebooting to apply\n", ssid);
+        Serial.flush();
+        delay(100);
+        ESP.restart();
+      }
+    }
   } else if (strcmp(line, "slot") == 0) {
     if (hasArg && !refusedWhileDriving()) {
       if (parseLong(arg, n) && n >= 15 && n <= 200) { slotMs = (int)n; prefs.putInt("slot_ms", slotMs); }
@@ -879,7 +928,7 @@ void handleConsoleLine(char *line) {
     printSettings();
   } else if (*line) {
     Serial.println("commands: index [n] | mode [mod|binary] | slot [ms] | limit [0.1..1] | "
-                   "pins [fwd back left right] | radio [wifi|ble|both] | test | "
+                   "pins [fwd back left right] | radio [wifi|ble|both] | wifi [<ssid> <password>|clear] | test | "
                    "act [buttons|servo] | drive [pwm|binary] | servo [centre left right] | "
                    "servo pin <n> | ramp [ms] | scope");
   }
@@ -1128,7 +1177,7 @@ void serviceWifi() {
   }
   if (!netStarted && failsafeActive && millis() - lastWifiTryMs >= WIFI_RETRY_MS) {
     lastWifiTryMs = millis();
-    WiFi.begin(WIFI_SSID, WIFI_PASS);
+    WiFi.begin(wifiSsid, wifiPass);
   }
 }
 
@@ -1158,6 +1207,9 @@ void setup() {
   snprintf(bleName, sizeof(bleName), "hive-car%d", carIndex);
   if (bleWanted()) ble.begin(bleName);
   if (wifiWanted()) {
+    // Before mode(): the name the DHCP server sees (the Orin's access point
+    // lists the car by it, see tools/wifi_ap_test.py).
+    WiFi.setHostname(bleName);
     WiFi.mode(WIFI_STA);
     // Power-save OFF: with it on, the radio naps between router beacons and
     // every other packet waits ~100 ms for wake-up (measured 2026-07-07:
@@ -1165,10 +1217,11 @@ void setup() {
     // control loop can't afford the naps. With BLE on as well the S3 aborts
     // at boot unless modem-sleep stays on, so `both` keeps the naps.
     WiFi.setSleep(radio == RADIO_BOTH);
-    WiFi.begin(WIFI_SSID, WIFI_PASS);
+    WiFi.begin(wifiSsid, wifiPass);
     lastWifiTryMs = millis();
     // Not waited for: the UART needs no network (see serviceWifi).
-    Serial.println("connecting to WiFi in the background (UART commands need no network)");
+    Serial.printf("connecting to WiFi '%s' as %s in the background (UART commands need no network)\n",
+                  wifiSsid, bleName);
   } else {
     WiFi.mode(WIFI_OFF);
     Serial.println("WiFi OFF (radio ble): commands over BLE or the UART only");

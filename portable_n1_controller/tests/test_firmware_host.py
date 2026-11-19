@@ -471,7 +471,7 @@ def test_the_console_and_the_frames_share_the_wire(fw):
 
 def test_overlong_lines_are_rejected_and_the_stream_recovers(fw):
     f = fw()
-    assert logs(f.rx(b"x" * 60 + b"\n")) == ["REJECTED: line too long, ignored"]
+    assert logs(f.rx(b"x" * 120 + b"\n")) == ["REJECTED: line too long, ignored"]
     ev = f.rx(b"{" + b"a" * 600 + b"}\n")
     assert logs(ev) == ["REJECTED: frame longer than 512 bytes, ignored"]
     ev = f.rx(b"{" + b"a" * 600 + b"}\n")
@@ -553,6 +553,20 @@ def test_boot_with_wifi_present_is_the_same_boot(fw):
     f = fw("--wifi-up")
     assert any("connecting to WiFi" in line for line in logs(f.boot))
     assert "IP: 192.168.4.77  listening on UDP 8888" in logs(f.run(1))
+
+
+def test_the_wifi_network_is_set_on_the_console_and_checked_first(fw):
+    f = fw()
+    assert any("connecting to WiFi 'host-test' as hive-car0" in line for line in logs(f.boot))
+    assert "wifi network 'host-test' (wifi_credentials.h)" in logs(f.rx(b"wifi\n"))
+    for bad in (b"wifi hive-arena\n", b"wifi hive-arena short\n", b"wifi " + b"s" * 33 + b" password1\n"):
+        assert any(line.startswith("REJECTED: wifi") for line in logs(f.rx(bad))), bad
+    f.rx(frame(0, (0.5, 0.0)))
+    assert any(line.startswith("REFUSED") for line in logs(f.rx(b"wifi hive-arena password1\n")))
+    f.run(310)                                          # stopped again
+    # the SSID is everything before the last space
+    assert "wifi network set to 'La Casa 2.4GHz' (saved) -- rebooting to apply" in logs(
+        f.rx(b"wifi La Casa 2.4GHz password1\n"))
 
 
 # ------------------------------------------------------- act servo (2026-11-13) ----

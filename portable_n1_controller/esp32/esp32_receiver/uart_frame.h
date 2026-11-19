@@ -16,7 +16,8 @@
 //
 // Bounded, and self-resynchronising: a frame may be up to MAX_LINE bytes (a
 // command packet for the sketch's MAX_CARS = 8 is about 250), a console line up
-// to MAX_CONSOLE characters (its long-standing limit). A longer line is
+// to MAX_CONSOLE characters (47 until `wifi <ssid> <password>` needed 5 + 32 +
+// 1 + 63 = 101). A longer line is
 // discarded whole, up to its newline, so line noise can never glue itself onto
 // the next frame. NUL bytes are noise and are dropped.
 #pragma once
@@ -26,7 +27,7 @@
 namespace uartframe {
 
 const size_t MAX_LINE = 512;
-const size_t MAX_CONSOLE = 47;
+const size_t MAX_CONSOLE = 101;
 
 enum Event {
   NONE = 0,

@@ -125,13 +125,15 @@ def main() -> None:
             actions = np.tile(np.array([0.0, steer]), n)
             sent = link.send_commands(actions)
             acks = link.wait_acks(sent["seq"], timeout_s=args.ack_timeout)
-            rtt_ms = (time.perf_counter() - tick_start) * 1000.0
+            rtt_ms = (time.perf_counter() - tick_start) * 1000.0     # the slowest car's
 
             for car, ack in acks.items():
                 if car >= n:
                     unexpected.add(car)
                     continue
-                rtts_ms[car].append(rtt_ms)
+                # Each car's own round trip: wait_acks returns only when the LAST car
+                # answers, so one slow car would otherwise show on every car.
+                rtts_ms[car].append((link.ack_arrived.get(car, time.perf_counter()) - tick_start) * 1000.0)
                 if isinstance(ack.get("rssi"), int):
                     rssis[car].append(ack["rssi"])
                 if not ack.get("applied", False):

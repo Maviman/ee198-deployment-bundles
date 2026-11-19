@@ -9,12 +9,14 @@ enum { WL_IDLE_STATUS = 0, WL_NO_SSID_AVAIL = 1, WL_CONNECTED = 3, WL_CONNECT_FA
 
 extern bool host_wifi_up;
 extern int host_wifi_begin_calls;
+extern std::string host_wifi_ssid;   // the SSID of the last begin()
 
 class WiFiClass {
  public:
   void mode(int) {}
   void setSleep(bool) {}
-  void begin(const char *, const char *) { host_wifi_begin_calls++; }
+  void setHostname(const char *) {}
+  void begin(const char *ssid, const char *) { host_wifi_begin_calls++; host_wifi_ssid = ssid; }
   int status() { return host_wifi_up ? WL_CONNECTED : WL_DISCONNECTED; }
   IPAddress localIP() { return IPAddress(192, 168, 4, 77); }
   String macAddress() { return String("AA:BB:CC:DD:EE:FF"); }

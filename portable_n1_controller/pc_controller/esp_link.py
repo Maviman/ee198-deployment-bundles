@@ -231,6 +231,9 @@ class EspLink:
                 self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_TOS, DSCP_EF)
             except (OSError, AttributeError):
                 pass
+        # car -> perf_counter() when its ACK arrived, for the last wait_acks()/wait_ack():
+        # per-car round trips in a fleet, where the call itself returns at the slowest car.
+        self.ack_arrived: dict[int, float] = {}
         # seq -> perf_counter() at send, for ACK round-trip times (poll_acks).
         self._sent_at: dict[int, float] = {}
         self.car_stats = {i: {"acks": 0, "rtt_ms": None, "rssi": None, "applied": None,
@@ -342,6 +345,7 @@ class EspLink:
     def _read_acks(self, seq: int, *, expect: int, timeout_s: float) -> dict[int, dict]:
         """Collect ACKs for `seq`, keyed by the reporting car's index."""
         acks: dict[int, dict] = {}
+        self.ack_arrived = {}     # car -> perf_counter() when its ACK for `seq` was read
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline and len(acks) < expect:
             self._service()
@@ -352,7 +356,9 @@ class EspLink:
                     continue          # an older tick's ACK arriving late
                 # Firmware predating CAR_INDEX omits "car"; treat it as slot 0 so a
                 # mixed fleet during a rolling reflash still reports something.
-                acks[int(ack.get("car", 0))] = ack
+                car = int(ack.get("car", 0))
+                acks[car] = ack
+                self.ack_arrived.setdefault(car, time.perf_counter())
             if idle:
                 time.sleep(0.002)
         return acks

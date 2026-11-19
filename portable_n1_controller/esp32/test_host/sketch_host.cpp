@@ -47,6 +47,7 @@
 unsigned long host_now_ms = 10000;     // up for 10 s: boot + WiFi connect take seconds on the real board
 bool host_wifi_up = false;
 int host_wifi_begin_calls = 0;
+std::string host_wifi_ssid;
 bool host_udp_bound = false;
 std::deque<HostDatagram> host_udp_rx;
 HardwareSerial Serial;

@@ -54,7 +54,16 @@ def main(argv=None) -> int:
     ap.add_argument("--arena-config", default=None)
     ap.add_argument("--homography", default=None)
     ap.add_argument("--hold-max-age-s", type=float, default=0.25,
-                    help="dead-man hold cap (do not raise for a driving session)")
+                    help="a car missed for longer than this is LOST (do not raise for a driving session)")
+    ap.add_argument("--evader-hold-max-age-s", type=float, default=1.0,
+                    help="the same for the evader, which is slow or parked: a car stopped beside it "
+                         "often hides its tag for a few frames")
+    ap.add_argument("--no-report-lost", action="store_true",
+                    help="old behaviour: send NOTHING while any vehicle is lost (the controller then "
+                         "stalls and E-stops). Default: keep sending, with the lost vehicle marked, so "
+                         "the controller can bring that car back into view")
+    ap.add_argument("--bounds-margin-m", type=float, default=0.45,
+                    help="track vehicles this far past the tape (a pose further out is rejected)")
     ap.add_argument("--synthetic", action="store_true", help="render tags instead of opening a camera")
     ap.add_argument("--world-port", type=int, default=None,
                     help="with --synthetic: take vehicle poses from tools/sim_world.py on this port")

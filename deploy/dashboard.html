@@ -574,11 +574,23 @@ function drawMap() {
   const cars = [];
   // Role commanders (the hive model) report each pursuer's role: colour by it.
   const carRoles = (c && fresh("control") && c.roles) || null;
-  if (v && fresh("vision")) for (const veh of v.vehicles || []) if (veh.x != null) {
+  if (v && fresh("vision")) for (let veh of v.vehicles || []) {
     const slot = /^P(\d+)$/.exec(veh.role || "");
+    if (veh.x == null) {
+      // Not in the cameras' view: draw it faded where the controller last saw it.
+      const cp = c && fresh("control") && c.poses;
+      const q = !cp ? null : slot ? (cp.pursuers || [])[+slot[1] - 1] : veh.role === "EVADER" ? cp.evader : null;
+      if (!q) continue;
+      veh = Object.assign({}, veh, { x: q[0], y: q[1], h: q[2], seen: false });
+    }
     const role = carRoles && slot ? String(carRoles[+slot[1] - 1] || "").toUpperCase() : "";
     const held = !!(c && c.hold && slot && c.hold[+slot[1] - 1]);
-    cars.push({ x: veh.x, y: veh.y, h: veh.h, label: (role ? `${veh.role} ${role}` : veh.role) + (held ? " HOLD" : ""),
+    // The controller's dead-zone state for this car: lost for good, out of the cameras' view
+    // (driving back along its own track), or past the tape and driving back in.
+    const dz = (c && fresh("control") && c.deadzone) || null, k = slot ? +slot[1] - 1 : -1;
+    const dzTag = !dz || k < 0 ? "" : (dz.gave_up || [])[k] ? " LOST"
+      : (dz.blind || [])[k] ? " OUT OF VIEW: BACKING UP" : (dz.recovering || [])[k] ? " DRIVING BACK IN" : "";
+    cars.push({ x: veh.x, y: veh.y, h: veh.h, label: (role ? `${veh.role} ${role}` : veh.role) + (held ? " HOLD" : "") + dzTag,
                 ev: veh.role === "EVADER", seen: veh.seen, color: ROLE_COLORS[role] });
   }
   const ringR = c && (c.hold_radius || c.capture_radius);
@@ -689,7 +701,7 @@ function render() {
   $("readysub").textContent = armedNow ? "ARMED" : rd.ok ? "all green" : "not ready";
   $("readysub").className = "sub " + (armedNow ? "ok" : rd.ok ? "ok" : "warn");
   $("runinfo").textContent = armedNow
-    ? `Running: stops by itself after ${run.cap_s} s (${Math.ceil(run.remaining_s ?? 0)} s left), if the car leaves the arena, or if the pose feed is lost. STOP ends it at once.`
+    ? `Running: stops by itself after ${run.cap_s} s (${Math.ceil(run.remaining_s ?? 0)} s left), if a car stays out of the cameras' view for 3 s, or if the pose feed is lost. A car that passes the tape is driven back in. STOP ends it at once.`
     : (run.halt_reason ? `Last run ended: ${run.halt_reason}.` : "")
       + (rd.hold_radius ? ` Hold zone ${rd.hold_radius} m: the car stands still inside it and keeps tracking.`
          : c ? " Hold zone is OFF: the car keeps driving at any distance from the evader." : "")

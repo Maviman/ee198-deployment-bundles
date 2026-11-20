@@ -60,6 +60,47 @@ def pose_from_marker(H, center_px, top_midpoint_px) -> tuple[float, float, float
     return float(x), float(y), float(np.arctan2(dy, dx))
 
 
+def camera_position(H, camera_matrix) -> tuple[float, float, float] | None:
+    """Where the camera is in the arena frame: (x_m, y_m, height above the floor in m), from the
+    floor homography ``H`` (undistorted pixels -> arena metres) and the lens matrix K.
+
+    inv(H) maps the floor to the image, so inv(K) inv(H) = s [r1 r2 t]: two columns of the
+    camera's rotation and its translation, and the camera centre is -R^T t. Returns None when
+    the two do not describe one real camera (no K, r1 and r2 not the same length or not at
+    right angles: a nominal K, or a homography fitted on distorted pixels), so a caller never
+    corrects with a made-up position."""
+    if camera_matrix is None:
+        return None
+    try:
+        K = np.asarray(camera_matrix, dtype=np.float64).reshape(3, 3)
+        M = np.linalg.inv(K) @ np.linalg.inv(np.asarray(H, dtype=np.float64).reshape(3, 3))
+    except (np.linalg.LinAlgError, ValueError):
+        return None
+    n1, n2 = float(np.linalg.norm(M[:, 0])), float(np.linalg.norm(M[:, 1]))
+    if not (n1 > 0.0 and n2 > 0.0 and 0.87 < n1 / n2 < 1.15):
+        return None
+    r1, r2, t = M[:, 0] / n1, M[:, 1] / n2, M[:, 2] / (0.5 * (n1 + n2))
+    if abs(float(r1 @ r2)) > 0.12:
+        return None
+    U, _s, Vt = np.linalg.svd(np.column_stack([r1, r2, np.cross(r1, r2)]))
+    R = U @ Vt                                         # the nearest true rotation
+    c = -R.T @ t
+    # The homography's sign is free; flipping it flips only the height.
+    x, y, z = float(c[0]), float(c[1]), abs(float(c[2]))
+    return (x, y, z) if np.isfinite([x, y, z]).all() and z > 0.2 else None
+
+
+def lift_to_height(xy, camera_xyz, height_m: float) -> tuple[float, float]:
+    """The arena position of a point ``height_m`` above the floor whose FLOOR-plane projection
+    (what the homography returns) is ``xy``. A tag on a car roof is seen along a ray that meets
+    the floor further from the camera than the car is: the error is height / camera height of
+    the horizontal distance to the camera (9 cm up, camera 1.6 m up, car 3.5 m away: 0.20 m),
+    always pointing away from the camera. Similar triangles undo it."""
+    cx, cy, cz = camera_xyz
+    k = 1.0 - float(height_m) / float(cz)
+    return cx + (float(xy[0]) - cx) * k, cy + (float(xy[1]) - cy) * k
+
+
 def save_homography_yaml(path, H, residuals_m, *, arena_config: str = "",
                          image_size=None, notes: str = "", corner_px=None,
                          extra: dict | None = None) -> None:

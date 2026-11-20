@@ -166,6 +166,48 @@ def default_hold_radius(environ=None, path: Path | None = None) -> tuple[float |
         raise ValueError(f"{src} must hold a number of metres, got {raw!r}") from None
 
 
+RECOVERY_FILE = Path.home() / ".arena" / "recovery"
+
+
+def parse_recovery(text: str) -> dict:
+    """The dead-zone recovery setting (pc_controller/deadzone.py) from words separated by
+    spaces or commas: `on` | `off`, `pwm` | `binary` (how the car's firmware drives the motor:
+    its `drive` setting), `min=<throttle>` (the smallest throttle that moves the car, 0..0.6),
+    `guard` | `noguard` (the edge brake of models that have no limiter of their own).
+    Raises ValueError on anything else."""
+    out = {"on": True, "binary": False, "min_throttle": 0.0, "guard": True}
+    for word in text.replace(",", " ").split():
+        w = word.strip().lower()
+        if w in ("on", "off"):
+            out["on"] = w == "on"
+        elif w in ("guard", "noguard"):
+            out["guard"] = w == "guard"
+        elif w in ("pwm", "binary"):
+            out["binary"] = w == "binary"
+        elif w.startswith("min="):
+            out["min_throttle"] = float(w[4:])
+            if not 0.0 <= out["min_throttle"] <= 0.6:
+                raise ValueError(f"min= must be 0..0.6, got {w[4:]!r}")
+        else:
+            raise ValueError(f"unknown word {word!r} (use: on | off, pwm | binary, min=<throttle>, "
+                             f"guard | noguard)")
+    return out
+
+
+def default_recovery(environ=None, path: Path | None = None) -> tuple[str, str]:
+    """(setting text, where it came from) for --recovery when the flag is absent: the
+    ARENA_RECOVERY environment variable, else the first line of ~/.arena/recovery, else
+    ("", ""): recovery on, a PWM drive, no minimum throttle."""
+    environ = os.environ if environ is None else environ
+    path = RECOVERY_FILE if path is None else path
+    if environ.get("ARENA_RECOVERY"):
+        return environ["ARENA_RECOVERY"], "ARENA_RECOVERY"
+    if path.is_file():
+        lines = path.read_text(encoding="utf-8").strip().splitlines()
+        return (lines[0] if lines else ""), str(path)
+    return "", ""
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--model", default="models/n1_catch", help="model dir (models/n1_catch or models/n1_pin)")
@@ -207,7 +249,25 @@ def main() -> None:
                          "once the evader is M + 0.1 m away. Not an E-stop, not a capture: nothing ends. "
                          "Default: the ARENA_HOLD_RADIUS environment variable, else the number in "
                          "~/.arena/hold_radius (so a plain `arena up` keeps it), else off (0 = off)")
+    rt.add_argument("--recovery", default=None, metavar="WORDS",
+                    help="what happens to a car the cameras lose or that passes the tape "
+                         "(pc_controller/deadzone.py). Words, comma separated: `on` (default: brake, "
+                         "then back along its own track until it is seen; past the tape, drive back "
+                         "in) or `off` (only stop it); `pwm` (default) or `binary` = the car "
+                         "firmware's `drive` setting (binary: the slow recovery throttle is sent as "
+                         "on/off pulses); `min=0.25` = the smallest throttle that moves the car; "
+                         "`noguard` = no edge brake (default `guard`: a car too fast to stop before the "
+                         "tape is braked; models with their own limiter are not touched). "
+                         "Default: the ARENA_RECOVERY environment variable, else the first line of "
+                         "~/.arena/recovery, else `on,pwm`")
     args = parser.parse_args()
+    recovery_src = "--recovery"
+    if args.recovery is None:
+        args.recovery, recovery_src = default_recovery()
+    try:
+        recovery = parse_recovery(args.recovery)
+    except ValueError as exc:
+        parser.error(f"{recovery_src or '--recovery'}: {exc}")
     explicit_hold = args.hold_radius is not None
     hold_src = "--hold-radius"
     if not explicit_hold:
@@ -320,6 +380,8 @@ def main() -> None:
                          max_pose_age_s=args.max_pose_age, telemetry=args.telemetry,
                          control_port=args.control_port, start_disarmed=args.start_disarmed,
                          model_name=args.model, hold_radius=args.hold_radius or None,
+                         recovery=recovery["on"], recovery_min_throttle=recovery["min_throttle"],
+                         recovery_binary_drive=recovery["binary"], edge_brake=recovery["guard"],
                          log=lambda m: print(f"[control {time.strftime('%H:%M:%S')}] {m}", flush=True))
     finally:
         if link is not None:

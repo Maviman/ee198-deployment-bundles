@@ -20,6 +20,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "vendored"))
 
 import vision  # noqa: E402,F401
+from hive_perception.core import arena_frame  # noqa: E402
 from hive_perception.core.camera_config import load_camera_config, write_local_override  # noqa: E402
 from hive_perception.core.frame_builder import FrameBuilder, MarkerMap  # noqa: E402
 from hive_perception.core.localizer import Localizer, corner_drift_px, expected_tag_px  # noqa: E402
@@ -81,9 +82,19 @@ def test_jump_gate_turns_a_teleport_into_a_dropout_then_reacquires():
     assert 1 in res.found
 
 
-def test_bounds_gate_rejects_a_tag_outside_the_arena():
+def test_bounds_gate_rejects_a_tag_far_outside_the_arena_but_tracks_one_just_past_the_tape():
+    # A car that overshoots the tape is still a car: the band just outside is tracked, so the
+    # controller can see it and drive it back in. Past bounds_margin_m a pose is rejected.
     mm, _H, r, loc = make()
-    res = loc.process(r.render({1: (1.3, 0.0, 0.0), 0: (0.0, 0.0, 0.0)}), 0.0)
+    hw = loc.arena_half_extent[0]
+    frame = r.render({1: (hw + 0.385, 0.0, 0.0), 0: (0.0, 0.0, 0.0)})
+    assert loc.bounds_margin_m == 0.45
+    res = loc.process(frame, 0.0)
+    assert 1 in res.found and abs(res.found[1][0] - (hw + 0.385)) < 0.03 and 0 in res.found
+
+    mm, _H, r, loc = make()
+    loc.bounds_margin_m = 0.30
+    res = loc.process(frame, 0.0)
     assert 1 not in res.found and (1, "bounds") in res.rejected
     assert 0 in res.found
 
@@ -155,11 +166,12 @@ def test_frame_extras_are_optional_and_cannot_override_contract_fields():
     frame = json.loads(raw)
     assert frame["t"] == 10.0 and frame["seq"] == 7
     pursuers, evader, meta = parse_pose_frame_meta(raw, expected_pursuers=1)
-    assert meta == {"seq": 7, "lat": 0.004} and pursuers[0].x == 0.1
+    assert (meta["seq"], meta["lat"]) == (7, 0.004) and pursuers[0].x == 0.1
+    assert meta["seen"] == [True, True] and meta["lost_s"] == [0.0, 0.0] and meta["t"] == 10.0
     # the original parser (and the ROS bridge's extra-less frames) still work
     parse_pose_frame(raw, expected_pursuers=1)
     _p, _e, meta = parse_pose_frame_meta(fb.build_frame(10.01), expected_pursuers=1)
-    assert meta == {"seq": None, "lat": None}
+    assert (meta["seq"], meta["lat"]) == (None, None)
 
 
 def test_vendored_parser_is_byte_identical_to_the_owner():
@@ -215,3 +227,62 @@ def test_upscaled_windows_keep_more_blurred_small_tags():
     flat, up = roi_hits(roi_upscale_below_px=0.0), roi_hits()
     assert up > flat, (up, flat)
     assert up >= 12, (up, flat)
+
+
+# ------------------------------------------------------------------ roof-tag height (parallax)
+def _corner_camera(cam_xyz, look_at, f_px=900.0, size=(1280, 720)):
+    """K, and the floor homography (pixels -> arena metres), of a pinhole camera at cam_xyz."""
+    c = np.asarray(cam_xyz, dtype=float)
+    fwd = np.asarray(look_at, dtype=float) - c
+    fwd /= np.linalg.norm(fwd)
+    right = np.cross(fwd, [0.0, 0.0, 1.0])
+    right /= np.linalg.norm(right)
+    down = np.cross(fwd, right)
+    R = np.vstack([right, down, fwd])                    # world -> camera
+    K = np.array([[f_px, 0.0, size[0] / 2], [0.0, f_px, size[1] / 2], [0.0, 0.0, 1.0]])
+
+    def project(p):
+        q = K @ (R @ (np.asarray(p, dtype=float) - c))
+        return q[:2] / q[2]
+
+    floor = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0), (0.3, -0.4)]
+    H, _res = arena_frame.fit_homography([project((x, y, 0.0)) for x, y in floor], floor)
+    return K, H, project
+
+
+def test_the_cameras_position_comes_back_out_of_its_floor_homography():
+    for cam, aim in (((1.8, -1.9, 1.6), (-0.3, 0.3, 0.0)), ((-2.0, 1.7, 1.25), (0.2, -0.2, 0.0))):
+        K, H, _ = _corner_camera(cam, aim)
+        got = arena_frame.camera_position(H, K)
+        assert got is not None and np.allclose(got, cam, atol=1e-6)
+    assert arena_frame.camera_position(H, None) is None
+    K_wrong = K.copy()
+    K_wrong[0, 0] *= 1.6                                  # not this camera's lens: refuse, never guess
+    assert arena_frame.camera_position(H, K_wrong) is None
+
+
+def test_a_roof_tag_reads_far_from_the_camera_until_its_height_is_corrected():
+    cam = (1.8, -1.9, 1.6)
+    K, H, project = _corner_camera(cam, (-0.3, 0.3, 0.0))
+    car, height = (-1.15, 1.1), 0.09                      # at the far corner, tag 9 cm up
+    floor_xy = arena_frame.project_px_to_arena(H, [project((*car, height))])[0]
+    error = math.dist(floor_xy, car)
+    assert 0.20 < error < 0.30                            # a car at the tape reads 0.2+ m past it
+    assert math.dist(floor_xy, cam[:2]) > math.dist(car, cam[:2])   # pushed AWAY from the camera
+    fixed = arena_frame.lift_to_height(floor_xy, arena_frame.camera_position(H, K), height)
+    assert math.dist(fixed, car) < 1e-6
+
+
+def test_the_localizer_corrects_only_when_a_tag_height_and_a_lens_matrix_are_given():
+    from dataclasses import replace
+
+    mm = MarkerMap("DICT_4X4_50", 0, [1], [10, 11, 12, 13])
+    K, H, _ = _corner_camera((1.8, -1.9, 1.6), (-0.3, 0.3, 0.0))
+    kw = dict(image_size=(1280, 720), arena_half_extent=HALF)
+    assert Localizer(mm, H, camera_matrix=K, **kw).camera_xyz is None           # no height set
+    high = replace(mm, vehicle_tag_height_m=0.09)
+    assert Localizer(high, H, camera_matrix=None, **kw).camera_xyz is None      # no lens matrix
+    loc = Localizer(high, H, camera_matrix=K, **kw)
+    assert np.allclose(loc.camera_xyz, (1.8, -1.9, 1.6), atol=1e-6)
+    assert high.tag_height_m(1) == 0.09 and high.tag_height_m(0) == 0.09
+    assert replace(high, evader_tag_height_m=0.05).tag_height_m(0) == 0.05

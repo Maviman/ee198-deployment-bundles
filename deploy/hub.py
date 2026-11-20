@@ -432,10 +432,10 @@ class Hub:
             near_edge = max(abs(px), abs(py)) >= EDGE_FACING_M
             inward = (px * math.cos(h) + py * math.sin(h)) < 0
             # Advisory only (operator's call, 2026-11-18): any start pose is allowed. A car facing
-            # out near the tape may drive out first; the run watchdog disarms it at the edge.
+            # out near the tape may drive out first; the controller then drives it back in.
             chk("car faces inward if it starts near an edge", (not near_edge) or inward,
                 "" if not near_edge or inward else
-                f"at ({px:.2f}, {py:.2f}) facing outward: allowed, the watchdog stops it at the tape",
+                f"at ({px:.2f}, {py:.2f}) facing outward: allowed, it is driven back in if it goes out",
                 advisory=True)
             cmd = c.get("cmd") or [0.0, 0.0]
             ang = (math.atan2(ey - py, ex - px) - h + math.pi) % (2 * math.pi) - math.pi
@@ -467,10 +467,16 @@ class Hub:
         return 200, reply
 
     def run_watchdog(self, gen: int) -> None:
-        """Supervises one operator-started run and disarms on its own: at the time cap, when
-        the car leaves the arena, or when the pose feed is lost (the controller has already
-        E-stopped; it would resume driving by itself when poses return, which for a car that
-        was lost is not what an operator expects, so the run ends instead)."""
+        """Supervises one operator-started run and disarms on its own: at the time cap, when a
+        car stays lost, or when the pose feed is lost (no frames at all: the controller has
+        already E-stopped; it would resume driving by itself when frames return, which is not
+        what an operator expects, so the run ends instead).
+
+        A car that passes the tape or leaves the cameras' view no longer ends the run
+        (2026-11-19): the controller brings it back (pc_controller/deadzone.py) and reports that
+        in its telemetry ("deadzone"). The run ends when the controller gives a car up (blind
+        for about 3 s). A controller that does not report "deadzone" (older code) gets the
+        old rule: disarm the moment a car's centre is past the tape."""
         t0, bad_since, reason = time.time(), None, None
         while gen == self._watch_gen:
             time.sleep(0.1)
@@ -488,9 +494,14 @@ class Hub:
             else:
                 poses = c.get("poses") or {}
                 hw, hh = ((v or {}).get("arena") or [0.915, 0.915])[:2]
-                for q in poses.get("pursuers") or []:
-                    if abs(q[0]) > hw + 0.005 or abs(q[1]) > hh + 0.005:
-                        reason = f"car left the arena ({q[0]:.2f}, {q[1]:.2f})"
+                dz = c.get("deadzone")
+                for i, q in enumerate(poses.get("pursuers") or []):
+                    if dz is None:
+                        if abs(q[0]) > hw + 0.005 or abs(q[1]) > hh + 0.005:
+                            reason = f"car left the arena ({q[0]:.2f}, {q[1]:.2f})"
+                    elif i < len(dz.get("gave_up") or []) and dz["gave_up"][i]:
+                        reason = (f"car {i} lost: not seen for {(dz.get('unseen_s') or [0] * (i + 1))[i]:.1f} s, "
+                                  f"last seen at ({q[0]:.2f}, {q[1]:.2f}); bring it back into view")
                 if c.get("state") != "RUNNING":
                     bad_since = bad_since or now
                     if now - bad_since > 1.0:

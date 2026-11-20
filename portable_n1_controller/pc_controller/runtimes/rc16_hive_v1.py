@@ -18,7 +18,9 @@ What it replays of rc16/hive/hive_env.py, in the env's order, once per 0.1 s cal
   2. every 5th call (0.5 s, the first call included): the commander decides -- build_obs -> ONNX -> argmax ->
      CommanderState.apply (0 = keep the play, 1..14 = switch, honoured after the 1.0 s minimum commitment)
   3. the control tick: playbook.slots -> driver.drive -> recovery.step -> shield -> clamp to [-1, 1]
-Every car counts as seen on every call (the loop's dead-man stop handles a pose stall). The evader-side logic of
+step(..., seen=) says which cars the cameras see on this call (default: all of them). An unseen car's row must
+hold its LAST SEEN pose and speed (the loop does that); it reaches recovery.py and the shield exactly as an unseen
+car does in training (hive_env: World.p_seen, rules.stale_speed on the ticks unseen). The evader-side logic of
 the env (the scripted evader, the box-stop tracker, rewards) is not part of deployment.
 """
 
@@ -31,6 +33,7 @@ from pathlib import Path
 import numpy as np
 
 RUNTIME = "rc16_hive_v1"
+HANDLES_UNSEEN = True      # step() takes seen=; the deployment loop then leaves blind recovery to this runtime
 
 _LIB = Path(__file__).resolve().parent / "rc16_hive_lib"
 if _LIB.is_dir() and str(_LIB) not in sys.path:
@@ -87,6 +90,8 @@ class CommanderRuntime:
         self.ticks = torch.zeros(1, dtype=torch.long)
         self.t = torch.zeros(1)
         self.recovering = torch.zeros(1, 3, dtype=torch.bool)
+        self.gave_up = torch.zeros(1, 3, dtype=torch.bool)
+        self.unseen = torch.zeros(1, 4, dtype=torch.long)       # consecutive calls each car was not seen (p0..p2, ev)
         self.action = 0
         self.last = {}
 
@@ -103,17 +108,25 @@ class CommanderRuntime:
         x = obs.numpy().astype(np.float32)
         return np.asarray(self.session.run(None, {self.input_name: x})[0], dtype=np.float32).reshape(-1)
 
-    def _world(self, p, e) -> G.World:
+    def _world(self, p, e, seen=None) -> G.World:
         f = lambda a: torch.as_tensor(np.asarray(a, dtype=np.float32))     # noqa: E731
         return G.World(p_xy=f(p[None, :, :2]), p_yaw=f(p[None, :, 2]), p_v=f(p[None, :, 3]),
                        e_xy=f(e[None, :2]), e_yaw=f(e[None, 2]), e_v=f(e[None, 3]),
-                       p_seen=torch.ones(1, 3, dtype=torch.bool), e_seen=torch.ones(1, dtype=torch.bool))
+                       p_seen=torch.ones(1, 3, dtype=torch.bool) if seen is None else seen[None, :3].clone(),
+                       e_seen=torch.ones(1, dtype=torch.bool) if seen is None else seen[None, 3].clone())
 
-    def step(self, pursuers, evader, dt: float = 0.1):
+    def step(self, pursuers, evader, dt: float = 0.1, seen=None):
+        """seen: None (every car seen), or 4 bools (p0, p1, p2, evader). An unseen car's row = its last seen
+        pose and speed."""
         p = np.asarray(pursuers, dtype=np.float64).reshape(3, 4)
         e = np.asarray(evader, dtype=np.float64).reshape(4)
         dt = float(dt) if dt and dt > 1e-6 else RU.TICK_S
-        w = self._world(p, e)
+        if seen is not None:
+            seen = torch.as_tensor(np.asarray(seen, dtype=bool).reshape(4))
+            self.unseen = torch.where(seen[None, :], torch.zeros_like(self.unseen), self.unseen + 1)
+        else:
+            self.unseen = torch.zeros_like(self.unseen)
+        w = self._world(p, e, seen)
         with torch.no_grad():
             if self.k > 0:                                       # the env's _book: progress of the 0.1 s just run
                 self.ticks += 1
@@ -135,15 +148,17 @@ class CommanderRuntime:
             # the env's _control
             slots = self.playbook.slots(w, self.cs.choice, self.cs.t_in_play, ~self.recovering)
             cmd = DRV.drive(w.p_xy, w.p_yaw, w.p_v, slots, w.e_xy, w.e_yaw, state=self.driver_state)
-            cmd, rec, _ = self.recovery.step(w.p_xy, w.p_yaw, w.p_v, w.p_seen, cmd, dt=RU.TICK_S)
-            cmd, _ = SH.shield(cmd, w.p_xy, w.p_yaw, RU.stale_speed(w.p_v, torch.zeros(1, 3, dtype=torch.long), RU.TICK_S))
+            cmd, rec, gave_up = self.recovery.step(w.p_xy, w.p_yaw, w.p_v, w.p_seen, cmd, dt=RU.TICK_S)
+            cmd, _ = SH.shield(cmd, w.p_xy, w.p_yaw, RU.stale_speed(w.p_v, self.unseen[:, :3], RU.TICK_S))
             cmd = torch.nan_to_num(cmd).clamp(-1.0, 1.0)
             self.recovering = rec
+            self.gave_up = gave_up
         self.k += 1
         out = cmd[0].numpy().astype(np.float32).copy()
         out[:, 0] = np.clip(out[:, 0], -self.throttle_limit, self.throttle_limit)
         self.last = {"command": out.tolist(), "roles": self.roles, "choice": int(self.cs.choice[0]),
-                     "action": self.action, "decided": decided}
+                     "action": self.action, "decided": decided,
+                     "recovering": [bool(r) for r in rec[0]], "gave_up": [bool(g) for g in gave_up[0]]}
         if obs is not None:
             self.last["obs"] = obs[0].tolist()
         return out

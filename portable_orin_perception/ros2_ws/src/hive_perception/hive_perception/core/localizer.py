@@ -25,7 +25,8 @@ full frame:
    core (the fast path) set it to None and run that audit off the hot path
    with ``audit()`` on a second detector instead.
 
-3. Plausibility gates. A pose outside the arena, a jump faster than a car can
+3. Plausibility gates. A pose far outside the arena (``bounds_margin_m`` past the tape: the
+   band just outside the tape is tracked on purpose, a car that overshoots is still a car), a jump faster than a car can
    drive, a tag the wrong size, or two copies of one id is rejected, not
    passed on. A rejected pose looks like a missed frame downstream: the
    FrameBuilder holds the last good pose for at most 0.25 s, then the
@@ -140,9 +141,9 @@ class Localizer:
                  roi_tracking: bool = True, gating: bool = True, tuned: bool = True,
                  subpixel: bool = True, full_frame_every_s: float | None = 1.0,
                  roi_upscale_below_px: float = 24.0,
-                 track_timeout_s: float = 0.3, max_speed_mps: float = 2.0,
+                 track_timeout_s: float = 0.3, max_speed_mps: float = 3.5,
                  jump_margin_m: float = 0.10, jump_window_s: float = 0.5,
-                 bounds_margin_m: float = 0.15) -> None:
+                 bounds_margin_m: float = 0.45) -> None:
         import cv2
 
         self.marker_map = marker_map
@@ -192,6 +193,12 @@ class Localizer:
         self._modules = modules
         self._subpixel = bool(subpixel)
         self._roi_detectors: dict[int, object] = {}
+
+        # Roof-tag height (marker_map vehicle_tag_height_m): needs the camera's position, which
+        # needs a real lens matrix. Without one the poses stay floor projections, as before.
+        self.camera_xyz = None
+        if self.homography is not None and any(marker_map.tag_height_m(v) > 0.0 for v in self.vehicle_ids):
+            self.camera_xyz = arena_frame.camera_position(self.homography, camera_matrix)
 
         self._tracks: dict[int, _Track] = {}
         self._last_full_t = -math.inf
@@ -272,7 +279,12 @@ class Localizer:
         ref = np.vstack([marker_math.marker_center_px(det.corners),
                          marker_math.marker_top_midpoint_px(det.corners)])
         ref = marker_math.undistort_points(ref, self.camera_matrix, self.dist_coeffs)
-        return arena_frame.pose_from_marker(self.homography, ref[0], ref[1])
+        x, y, heading = arena_frame.pose_from_marker(self.homography, ref[0], ref[1])
+        height = self.marker_map.tag_height_m(det.marker_id) if self.camera_xyz is not None else 0.0
+        if height > 0.0:
+            # The whole tag is at one height, so the heading is already right: only x, y move.
+            x, y = arena_frame.lift_to_height((x, y), self.camera_xyz, height)
+        return x, y, heading
 
     def _gate(self, vid: int, det: Detection, pose, t: float) -> str | None:
         """Reason to reject, or None to accept."""

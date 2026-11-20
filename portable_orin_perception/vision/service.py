@@ -22,15 +22,18 @@ perf_counter on Linux) plus a fixed epoch offset taken at start-up. It never jum
 finite-differencing) and still reads as wall-clock seconds, so cross-machine
 latency tools keep working when chrony is running.
 
-Safety semantics are the FrameBuilder's, unchanged: any vehicle unseen for
-more than hold_max_age_s by EVERY camera -> no frame is sent -> the
-controller's 0.3 s dead-man stops the cars. Camera unplugged, process crash,
-bumped calibration: each one ends in silence, and silence stops the cars.
+Safety semantics are the FrameBuilder's. A vehicle unseen for more than its hold
+time by EVERY camera is LOST: the frames keep going with that vehicle marked
+lost (no pose, only where it was last seen), and the controller brings the car
+back into view or stops it. Camera unplugged, process crash: silence, and
+silence stops the cars (the controller's 0.3 s dead-man). With --no-report-lost
+a lost vehicle silences the stream as it did before 2026-11-19.
 """
 
 from __future__ import annotations
 
 import json
+import math
 import signal
 import socket
 import threading
@@ -217,7 +220,8 @@ class VisionService:
                 self.marker_map, calibration["homography"], image_size=cam.size,
                 camera_matrix=K, dist_coeffs=D, arena_half_extent=self.half,
                 roi_tracking=not args.no_roi, gating=not args.no_gating,
-                full_frame_every_s=None)
+                full_frame_every_s=None,
+                bounds_margin_m=float(getattr(args, "bounds_margin_m", 0.45)))
             self.slots.append(CameraSlot(i, cam, calibration, localizer, self.vehicle_ids, self.half))
         self.cam: CameraConfig = self.slots[0].cam          # the primary camera (dashboard overlay)
         self.calibration = self.slots[0].calibration
@@ -227,7 +231,9 @@ class VisionService:
         self.fuser = PoseFuser(self.vehicle_ids)
         self.builder = FrameBuilder(pursuer_ids=self.marker_map.pursuer_ids,
                                     evader_id=self.marker_map.evader_id,
-                                    hold_max_age_s=args.hold_max_age_s)
+                                    hold_max_age_s=args.hold_max_age_s,
+                                    evader_hold_max_age_s=getattr(args, "evader_hold_max_age_s", None),
+                                    report_lost=not getattr(args, "no_report_lost", True))
         self.lock = threading.Lock()            # fuser + builder + send counters
         self.targets = parse_targets(args.pose_target, 9870)
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -306,6 +312,17 @@ class VisionService:
             if s.localizer.vehicle_px_range:
                 lo, hi = s.localizer.vehicle_px_range
                 self.log(f"camera {s.index}: expected vehicle tag size {lo:.1f}-{hi:.1f} px")
+            tag_h = self.marker_map.vehicle_tag_height_m
+            if tag_h > 0.0 and s.localizer.camera_xyz is not None:
+                cx, cy, cz = s.localizer.camera_xyz
+                far = max(math.hypot(cx - sx * self.half[0], cy - sy * self.half[1]) for sx in (-1, 1) for sy in (-1, 1))
+                self.log(f"camera {s.index}: at ({cx:+.2f}, {cy:+.2f}), {cz:.2f} m above the floor; roof tags "
+                         f"{100 * tag_h:.0f} cm up are corrected for it (by up to {100 * tag_h / cz * far:.0f} cm "
+                         f"at its far corner)")
+            elif tag_h > 0.0:
+                self.log(f"camera {s.index}: vehicle_tag_height_m is set but this camera's position cannot be "
+                         f"worked out (no measured lens matrix, or it does not fit the calibration): its poses "
+                         f"are NOT corrected for the tag's height")
         workers = [threading.Thread(target=self._worker, args=(s, cv2), name=f"cam{s.index}", daemon=True)
                    for s in self.slots]
         for w in workers:
@@ -400,7 +417,11 @@ class VisionService:
             lat = now_mono - frame.t_capture
             payload = self.builder.build_frame(now_mono + self.epoch_offset,
                                                extra={"seq": self.seq_out + 1, "lat": round(lat, 5),
-                                                      "cam": slot.index})
+                                                      "cam": slot.index,
+                                                      # the taped square the cameras were calibrated on
+                                                      # (half width, half height, m): where "past the
+                                                      # tape" is, for the controller's dead zone
+                                                      "arena": [round(self.half[0], 4), round(self.half[1], 4)]})
             if payload is not None:
                 data = payload.encode("utf-8")
                 for target in self.targets:

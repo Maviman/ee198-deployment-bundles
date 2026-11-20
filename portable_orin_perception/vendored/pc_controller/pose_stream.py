@@ -17,6 +17,19 @@ Frame format (one JSON object per UDP datagram):
   seconds, measured on the vision host's clock. The controller adds its own
   receive->command time to that for an end-to-end figure that needs no
   cross-machine clock sync. Senders that omit them (the ROS bridge) still parse.
+- A LOST vehicle (the cameras have not seen it for longer than its hold time)
+  carries no pose, only how long it has been lost and where it was last seen:
+
+      {"x": null, "y": null, "heading": null, "lost_s": 0.62,
+       "last": {"x": 1.18, "y": 0.4, "heading": 0.1}}
+
+  A pose that perception is HOLDING (seen a few frames ago) carries its own
+  capture time as "t" in its entry; VehiclePose.timestamp_s is then that time, so
+  a speed estimate does not read a held pose as a car standing still.
+  parse_pose_frame_meta() returns a lost vehicle as a VehiclePose at the LAST SEEN place and
+  says so in meta["seen"] (pursuers in order, then the evader) and
+  meta["lost_s"]. parse_pose_frame() (callers that cannot handle a lost vehicle)
+  raises ValueError for such a frame, which every caller treats as a bad frame.
 """
 
 from __future__ import annotations
@@ -28,32 +41,48 @@ import time
 from controller_runtime.pose_types import VehiclePose
 
 
-def _parse(frame: dict, expected_pursuers: int) -> tuple[list[VehiclePose], VehiclePose]:
+def _vehicle(entry: dict, t: float) -> tuple[VehiclePose, bool, float]:
+    """(pose, seen, lost_s). A lost entry gives the last seen pose, seen False."""
+    own_t = entry.get("t")
+    t = t if own_t is None else float(own_t)       # a held or lost pose carries its own capture time
+    if entry["x"] is None:
+        last = entry["last"]
+        return (VehiclePose(float(last["x"]), float(last["y"]), float(last["heading"]), t), False,
+                float(entry.get("lost_s") or 0.0))
+    return VehiclePose(float(entry["x"]), float(entry["y"]), float(entry["heading"]), t), True, 0.0
+
+
+def _parse(frame: dict, expected_pursuers: int):
+    """(pursuers, evader, seen, lost_s); seen / lost_s list the pursuers in order, then the evader."""
     t = float(frame["t"])
-    pursuers = [
-        VehiclePose(float(p["x"]), float(p["y"]), float(p["heading"]), t)
-        for p in frame["pursuers"]
-    ]
-    if len(pursuers) != expected_pursuers:
-        raise ValueError(f"expected {expected_pursuers} pursuer poses, got {len(pursuers)}")
-    ev = frame["evader"]
-    evader = VehiclePose(float(ev["x"]), float(ev["y"]), float(ev["heading"]), t)
-    return pursuers, evader
+    parsed = [_vehicle(p, t) for p in frame["pursuers"]]
+    if len(parsed) != expected_pursuers:
+        raise ValueError(f"expected {expected_pursuers} pursuer poses, got {len(parsed)}")
+    parsed.append(_vehicle(frame["evader"], t))
+    poses = [p[0] for p in parsed]
+    return poses[:-1], poses[-1], [p[1] for p in parsed], [p[2] for p in parsed]
 
 
 def parse_pose_frame(raw: bytes | str, *, expected_pursuers: int) -> tuple[list[VehiclePose], VehiclePose]:
     frame = json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
-    return _parse(frame, expected_pursuers)
+    pursuers, evader, seen, _lost = _parse(frame, expected_pursuers)
+    if not all(seen):
+        raise ValueError("frame has a lost vehicle (this caller needs every pose)")
+    return pursuers, evader
 
 
 def parse_pose_frame_meta(raw: bytes | str, *, expected_pursuers: int) -> tuple[list[VehiclePose], VehiclePose, dict]:
-    """parse_pose_frame plus the optional fields: {"seq": int|None, "lat": float|None}."""
+    """The poses plus {"seq": int|None, "lat": float|None, "seen": [bool], "lost_s": [float]}.
+    seen / lost_s list the pursuers in order, then the evader. A vehicle that is not seen is
+    returned at its LAST SEEN pose: check meta["seen"] before trusting a pose."""
     frame = json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
-    pursuers, evader = _parse(frame, expected_pursuers)
+    pursuers, evader, seen, lost_s = _parse(frame, expected_pursuers)
     lat = frame.get("lat")
     seq = frame.get("seq")
     return pursuers, evader, {"seq": None if seq is None else int(seq),
-                              "lat": None if lat is None else float(lat)}
+                              "lat": None if lat is None else float(lat),
+                              "t": float(frame["t"]), "seen": seen, "lost_s": lost_s,
+                              "arena": frame.get("arena")}
 
 
 class UdpPoseSource:
@@ -80,7 +109,10 @@ class UdpPoseSource:
             raw, _addr = self.sock.recvfrom(65535)
         except socket.timeout:
             return None
-        return parse_pose_frame(raw, expected_pursuers=self.expected_pursuers)
+        try:
+            return parse_pose_frame(raw, expected_pursuers=self.expected_pursuers)
+        except ValueError:
+            return None                      # a lost vehicle: for this caller the same as no frame
 
     def next_latest(self, timeout_s: float):
         """Newest valid frame as (pursuers, evader, meta), waiting up to

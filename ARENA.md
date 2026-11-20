@@ -240,12 +240,22 @@ Alerts you may see, and what to do:
 
 ## Safety chain (unchanged in spirit, tightened in places)
 
-Every hop fails to *stopped*:
+Every hop fails to *stopped*, with one deliberate exception since 2026-11-19 (hop 1):
 
-1. A car tag unseen or rejected for > 0.25 s → the vision service sends
-   **nothing** (a held pose is never guessed past that).
-2. No usable pose for 0.3 s → the controller E-stops every car. "Usable" now
-   also means **fresh**: a pose that took > 150 ms to arrive is never acted on.
+1. A car tag unseen or rejected for > 0.25 s → that car is **LOST**. The vision
+   service keeps sending frames with the car marked lost (no pose, only where it
+   was last seen; a held pose is never guessed past 0.25 s), and the controller
+   **brings that car back into view**: it brakes, then replays the commands the
+   car was sent while it was seen, backwards and slowly, so the car retraces its
+   own track. A car seen past the tape is driven back in. Unseen for 4.5 s (3 s
+   for the 3-car models) → that car is stopped and the dashboard ends the run.
+   While the evader is lost every car stands still. A camera or vision process
+   that dies still sends nothing. `~/.arena/recovery` holding `off` restores
+   "a lost car is only stopped". Details and the settings (a `drive binary`
+   car needs the word `binary` there):
+   [docs/handoff/2026-11-19-dead-zone.md](docs/handoff/2026-11-19-dead-zone.md).
+2. No pose frame for 0.3 s → the controller E-stops every car. A usable frame
+   also has to be **fresh**: a pose that took > 150 ms to arrive is never acted on.
 3. No command for 0.3 s → each ESP32 goes neutral on its own (over WiFi or a UART cable alike).
    Neutral means every button released; the V3 car then still runs on for about
    0.35-0.45 s (measured on blocks, 2026-10-02), so budget that on top of the 0.3 s.
@@ -255,7 +265,7 @@ Every hop fails to *stopped*:
    from a shell, and the dashboard's START button from a browser on that machine
    (the arm port itself still listens on localhost only; the hub re-checks readiness,
    refuses other machines and cross-site requests, and its watchdog disarms a run at
-   the 120 s cap, when the car leaves the arena, or when the pose feed is lost). `arena
+   the 120 s cap, when a car stays lost, or when the pose feed is lost). `arena
    halt`, the dashboard STOP (from anywhere), Ctrl-C and `arena stop` all E-stop on
    the next packet.
 5. Crashes: the vision service and controller run under a supervisor that

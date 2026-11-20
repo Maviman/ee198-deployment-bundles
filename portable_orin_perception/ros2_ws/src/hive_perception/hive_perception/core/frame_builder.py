@@ -15,6 +15,23 @@ must NOT send anything -> the controller's own 0.3 s pose-stall dead-man fires
 an E-stop. Never fabricate stale poses past the cap; a silent stream IS the
 E-stop signal.
 
+Lost vehicles (``report_lost=True``, what run_vision.py uses since 2026-11-19): a vehicle held
+past its cap no longer silences the stream. Its entry is sent with x, y and heading null, the
+seconds since it was last seen (``lost_s``) and that last seen pose (``last``):
+
+    {"x": null, "y": null, "heading": null, "lost_s": 0.62, "last": {"x": 1.18, "y": 0.4, "heading": 0.1}}
+
+A pose that is being HELD (seen a few frames ago, within its hold time) carries its own
+capture time as "t" inside the entry; a pose from the newest frame does not.
+
+The controller then knows WHICH car the cameras lost and where, and can bring it back (blind
+recovery) instead of ending the run. Nothing is fabricated: a lost vehicle carries no pose. A
+controller that predates this cannot parse the nulls, counts the frame as bad and stalls: the
+old behaviour, so a version mismatch fails safe. Silence still means stop: a dead camera or a
+crashed process sends nothing, and before every vehicle has been seen once nothing is sent.
+The evader may be held longer than the cars (``evader_hold_max_age_s``): it is slow or parked,
+and a parked car beside it often hides its tag for a few frames.
+
 Timestamps: staleness is judged against ``now_t`` (the caller's current clock),
 but the frame's ``t`` field is the CAPTURE time of the newest contributing
 detection — per the perception contract, ``t`` feeds velocity
@@ -61,6 +78,16 @@ class MarkerMap:
     # detections that are the wrong size to be one of our tags.
     vehicle_tag_m: float = 0.07
     corner_tag_m: float = 0.10
+    # How high the vehicle tags ride above the floor (m). 0 = not corrected: a roof tag then
+    # reads further from the camera than the car is (arena_frame.lift_to_height). The evader's
+    # may differ (another car); None = the same as the pursuers'.
+    vehicle_tag_height_m: float = 0.0
+    evader_tag_height_m: float | None = None
+
+    def tag_height_m(self, vid: int) -> float:
+        if int(vid) == self.evader_id and self.evader_tag_height_m is not None:
+            return float(self.evader_tag_height_m)
+        return float(self.vehicle_tag_height_m)
 
     def with_pursuers(self, n: int | None) -> MarkerMap:
         """Track only the first ``n`` pursuer tags: CAR_INDEX 0..n-1, the cars a
@@ -141,18 +168,25 @@ def load_marker_map(path) -> MarkerMap:
         extra_print_ids=[int(i) for i in data.get("extra_print_ids", [])] or None,
         vehicle_tag_m=float(data.get("vehicle_tag_m", 0.07)),
         corner_tag_m=float(data.get("corner_tag_m", 0.10)),
+        vehicle_tag_height_m=float(data.get("vehicle_tag_height_m", 0.0) or 0.0),
+        evader_tag_height_m=(None if data.get("evader_tag_height_m") is None
+                             else float(data["evader_tag_height_m"])),
     )
 
 
 class FrameBuilder:
     def __init__(self, *, pursuer_ids: Sequence[int], evader_id: int,
-                 hold_max_age_s: float = 0.25) -> None:
+                 hold_max_age_s: float = 0.25, evader_hold_max_age_s: float | None = None,
+                 report_lost: bool = False) -> None:
         ids = [int(i) for i in pursuer_ids] + [int(evader_id)]
         if len(set(ids)) != len(ids):
             raise ValueError(f"duplicate vehicle ids: {ids}")
         self.pursuer_ids = [int(i) for i in pursuer_ids]
         self.evader_id = int(evader_id)
         self.hold_max_age_s = float(hold_max_age_s)
+        self.evader_hold_max_age_s = float(hold_max_age_s if evader_hold_max_age_s is None
+                                           else evader_hold_max_age_s)
+        self.report_lost = bool(report_lost)
         self._last: dict[int, TimedPose] = {}
 
     @property
@@ -168,33 +202,58 @@ class FrameBuilder:
                 x, y, heading = detections[vid]
                 self._last[vid] = TimedPose(float(x), float(y), float(heading), float(t))
 
+    def _hold(self, vid: int) -> float:
+        return self.evader_hold_max_age_s if vid == self.evader_id else self.hold_max_age_s
+
     def missing_ids(self, now_t: float) -> list[int]:
-        """Vehicles currently blocking a frame (never seen, or held too long)."""
+        """Vehicles not seen within their hold time (never seen, or held too long). Without
+        ``report_lost`` any of these blocks the frame; with it, only a never-seen one does."""
         out = []
         for vid in self.tracked_ids:
             last = self._last.get(vid)
-            if last is None or (now_t - last.t) > self.hold_max_age_s:
+            if last is None or (now_t - last.t) > self._hold(vid):
                 out.append(vid)
         return out
 
     def build_frame(self, now_t: float, extra: Mapping[str, object] | None = None) -> str | None:
-        """One UDP-ready JSON frame, or None if any tracked vehicle is stale
-        (in which case the caller must send NOTHING — see module docstring).
+        """One UDP-ready JSON frame, or None (the caller must then send NOTHING, see the module
+        docstring): when any tracked vehicle is stale, or with ``report_lost`` only when a
+        vehicle has never been seen (a stale one is then sent as a lost entry).
 
         ``extra`` adds optional keys after the contract fields (the fast path
         sends ``seq`` and ``lat``, see portable_n1_controller's pose_stream).
         It can never override ``t``/``pursuers``/``evader``."""
         poses: list[TimedPose] = []
+        entries: list[dict] = []
+        fresh_t: list[float] = []
         for vid in self.tracked_ids:
             last = self._last.get(vid)
-            if last is None or (now_t - last.t) > self.hold_max_age_s:
+            if last is None:
                 return None
+            age = now_t - last.t
+            if age > self._hold(vid):
+                if not self.report_lost:
+                    return None
+                entries.append({"x": None, "y": None, "heading": None, "lost_s": round(age, 3),
+                                "last": {"x": last.x, "y": last.y, "heading": last.heading}, "t": last.t})
+            else:
+                entries.append({"x": last.x, "y": last.y, "heading": last.heading})
+                fresh_t.append(last.t)
             poses.append(last)
-        capture_t = max(p.t for p in poses)
+        # Capture time of the newest pose in the frame. With every vehicle lost there is none:
+        # the frame is then only a heartbeat ("cameras alive, nothing seen") stamped now.
+        capture_t = max(fresh_t) if fresh_t else now_t
+        if self.report_lost:
+            # A HELD pose (missed on the newest frames, still within its hold time) says when it
+            # was really captured. Without this the controller sees an unchanged pose under a
+            # newer frame time and reads the car's speed as zero just before it is lost.
+            for entry, pose in zip(entries, poses):
+                if entry["x"] is not None and capture_t - pose.t > 1e-4:
+                    entry["t"] = pose.t
         payload = {
             "t": capture_t,
-            "pursuers": [{"x": p.x, "y": p.y, "heading": p.heading} for p in poses[:-1]],
-            "evader": {"x": poses[-1].x, "y": poses[-1].y, "heading": poses[-1].heading},
+            "pursuers": entries[:-1],
+            "evader": entries[-1],
         }
         if extra:
             for key, value in extra.items():

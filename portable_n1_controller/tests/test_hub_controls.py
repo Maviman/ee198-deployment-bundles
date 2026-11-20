@@ -199,7 +199,41 @@ def test_watchdog_disarms_at_the_time_cap(rig):
     assert "time cap" in r.state()["run"]["halt_reason"]
 
 
+DEADZONE = {"mode": "controller", "unseen_s": [0.0], "recovering": [False], "blind": [False],
+            "gave_up": [False], "edge_brake": [False], "evader_unseen_s": 0.0, "evader_hold": False}
+
+
+def test_a_car_past_the_tape_does_not_end_the_run_when_the_controller_recovers_cars(rig):
+    r = rig()
+    r.control["deadzone"] = dict(DEADZONE)
+    assert r.post("/api/arm")[0] == 200
+    time.sleep(0.4)
+    r.control["poses"]["pursuers"] = [[-1.05, 0.1, 3.1]]            # 0.135 m past the tape
+    r.control["deadzone"] = dict(DEADZONE, recovering=[True])
+    time.sleep(0.8)
+    assert "disarm" not in r.fc.cmds and r.state()["run"]["halt_reason"] is None
+    # out of the cameras' view and backing up: still running
+    r.control["deadzone"] = dict(DEADZONE, recovering=[True], blind=[True], unseen_s=[1.4])
+    time.sleep(0.6)
+    assert "disarm" not in r.fc.cmds
+
+
+def test_watchdog_ends_the_run_when_the_controller_gives_a_lost_car_up(rig):
+    r = rig()
+    r.control["deadzone"] = dict(DEADZONE)
+    assert r.post("/api/arm")[0] == 200
+    time.sleep(0.4)
+    r.control["poses"]["pursuers"] = [[-1.0, 0.1, 3.1]]
+    r.control["deadzone"] = dict(DEADZONE, recovering=[True], blind=[True], gave_up=[True], unseen_s=[4.6])
+    time.sleep(0.6)
+    assert "disarm" in r.fc.cmds
+    reason = r.state()["run"]["halt_reason"]
+    assert "car 0 lost" in reason and "4.6 s" in reason and "(-1.00, 0.10)" in reason
+
+
 def test_watchdog_disarms_when_the_car_leaves_the_arena(rig):
+    # A controller that does not report "deadzone" (older code) cannot bring a car back:
+    # the run still ends the moment the car's centre is past the tape.
     r = rig()
     assert r.post("/api/arm")[0] == 200
     time.sleep(0.4)

@@ -20,6 +20,10 @@ Safety (unchanged semantics, plus two additions)
   "late" and never acted on. If only late frames arrive for ``stall_s``,
   that is a stall too. The policy collapses beyond ~0.2 s of latency
   (Phase 2 robustness grid), so acting on stale poses is worse than stopping.
+- A LOST car is not a stall (2026-11-19). Perception keeps sending frames with that car
+  marked lost; pc_controller/deadzone.py brings it back into view (blind recovery) or stops
+  it, and stands every car still while the evader is lost. A stall is now only what it says:
+  no frames at all (camera or process down, network gone), or only late ones.
 - NEW: operator arm/disarm. With ``start_disarmed`` the policy runs and its
   output is shown on the dashboard, but every car receives E-stop packets
   until an operator arms (`arena go`). Disarm (`arena halt`, the dashboard
@@ -40,6 +44,7 @@ import time
 
 import numpy as np
 
+from pc_controller.deadzone import CarSpec, DeadZone, fresh_seen
 from pc_controller.pose_stream import UdpPoseSource
 
 
@@ -186,12 +191,24 @@ def run_realtime(loop, link, *, pose_port: int, tick_hz: float = 10.0, stall_s: 
                  max_pose_age_s: float = 0.15, telemetry: str | None = None,
                  control_port: int | None = None, start_disarmed: bool = False,
                  model_name: str = "", log=print, stop=None,
-                 hold_radius: float | None = None) -> None:
+                 hold_radius: float | None = None, recovery: bool = True,
+                 recovery_min_throttle: float = 0.0, recovery_binary_drive: bool = False,
+                 edge_brake: bool = True) -> None:
     """Run the loop until Ctrl-C/SIGTERM, or until ``stop`` (an optional threading.Event,
     for tests and embedders) is set. The pose socket is closed on the way out either way;
     the caller owns the link. ``hold_radius`` (metres) turns on the HoldZone around the
-    evader; None or 0 leaves the policy in charge at every distance."""
+    evader; None or 0 leaves the policy in charge at every distance. ``recovery`` False:
+    a car the cameras lose is only stopped, never driven blind (pc_controller/deadzone.py);
+    the other two say how this car's drive takes a slow recovery throttle (same module)."""
     n = loop.policy.num_pursuers
+    handles_unseen = bool(getattr(loop, "handles_unseen", False)) and recovery
+    dead = DeadZone(
+        n, spec=CarSpec.from_manifest(getattr(loop.policy, "manifest", None) or {}) if recovery else None,
+        runtime_handles_unseen=handles_unseen,
+        runtime_status=getattr(loop, "recovery_status", None) if handles_unseen else None,
+        dt=1.0 / tick_hz, min_throttle=recovery_min_throttle, binary_drive=recovery_binary_drive,
+        guard=edge_brake)
+    last_seen = None
     source = UdpPoseSource(pose_port, expected_pursuers=n)
     tel = Telemetry(telemetry)
     ctl = ControlPort(control_port)
@@ -217,6 +234,16 @@ def run_realtime(loop, link, *, pose_port: int, tick_hz: float = 10.0, stall_s: 
     last_manual_send = 0.0
     log(f"listening for pose frames on UDP :{pose_port}; tick {tick_hz:g} Hz; "
         f"{'DISARMED until `arena go`' if not armed else 'ARMED'} (ctrl-C to stop)")
+    log({"runtime": "DEAD ZONE: a car the cameras lose is brought back by the model's own recovery "
+                    "(brake, then back along its track); past the tape it drives back in",
+         "controller": "DEAD ZONE: a car the cameras lose is brought back by the controller (brake, then "
+                       "back along its own track); past the tape it drives back in"
+                       + ("; EDGE BRAKE on (too fast to stop before the tape: brake)" if edge_brake else ""),
+         "stop-only": "DEAD ZONE: a car the cameras lose is STOPPED until it is seen again (no blind "
+                      "recovery" + (" requested" if not recovery else ": the model's manifest lacks the car's numbers") + ")",
+         }[dead.mode]
+        + (f"; recovery throttle as on/off pulses (drive binary)" if recovery_binary_drive else
+           f"; recovery throttle at least {recovery_min_throttle:g}" if recovery_min_throttle else ""))
     if hold is not None:
         log(f"HOLD ZONE on: a car within {hold.radius:g} m of the evader stands still (buttons released, "
             f"still armed); it drives again once the evader is {hold.resume_radius:g} m away")
@@ -248,6 +275,9 @@ def run_realtime(loop, link, *, pose_port: int, tick_hz: float = 10.0, stall_s: 
             "poses": None if last_poses is None else {
                 "pursuers": [[round(p.x, 4), round(p.y, 4), round(p.heading, 4)] for p in last_poses[0]],
                 "evader": [round(last_poses[1].x, 4), round(last_poses[1].y, 4), round(last_poses[1].heading, 4)]},
+            # which poses the cameras see right now (pursuers in order, then the evader); a
+            # False one is drawn where it was LAST seen. deadzone: what is being done about it.
+            "seen": last_seen, "deadzone": dead.status(),
             "dist": dist, "capture_radius": capture_radius, "cars": cars,
             "hold_radius": None if hold is None else hold.radius,
             "hold": None if hold is None else list(hold.held),
@@ -351,6 +381,7 @@ def run_realtime(loop, link, *, pose_port: int, tick_hz: float = 10.0, stall_s: 
                     if manual is None:            # manual drive needs no poses
                         estop("stall")
                     loop.reset()          # stale histories would corrupt velocity estimates
+                    dead.reset()
                     if hold is not None:
                         hold.reset()
                     state, due = "STALLED", None
@@ -381,9 +412,25 @@ def run_realtime(loop, link, *, pose_port: int, tick_hz: float = 10.0, stall_s: 
                 continue                  # not this tick's frame; a nearer one is coming
             # --- tick ---------------------------------------------------------
             t_inf = time.perf_counter()
-            action = loop.tick(pursuer_poses=pursuers, evader_pose=evader)
+            seen, lost_s = fresh_seen(pursuers, evader, meta)
+            arena = meta.get("arena")
+            if arena:
+                try:
+                    model_half = dead.spec.half_m if dead.spec is not None else None
+                    if dead.set_arena_half(min(float(arena[0]), float(arena[1]))):
+                        log(f"DEAD ZONE: the cameras are calibrated on a {2 * dead.spec.half_m:.2f} m square, the "
+                            f"model was trained on {2 * model_half:.2f} m: the tape is taken from the cameras")
+                except (TypeError, ValueError, IndexError):
+                    pass
+            if handles_unseen and seen is not None:
+                action = loop.tick(pursuer_poses=pursuers, evader_pose=evader, seen=seen)
+            else:
+                action = loop.tick(pursuer_poses=pursuers, evader_pose=evader)
             if hold is not None:
                 action = hold.apply(action, pursuers, evader, log)
+            # Last: a recovering car's command replaces whatever the model or the hold zone said.
+            action = dead.apply(action, pursuers, evader, seen, lost_s, log)
+            last_seen = None if seen is None else [bool(s) for s in seen]
             t_done = time.perf_counter()
             if link is not None and manual is None:
                 if armed:

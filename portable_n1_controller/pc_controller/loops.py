@@ -96,6 +96,9 @@ class HiveLoop:
         manifest = manifest or read_manifest(model_dir)
         module = importlib.import_module(RUNTIMES[manifest["runtime"]])
         self.runtime = module.CommanderRuntime(str(model_dir))
+        # True: the runtime takes `seen` and recovers unseen / out-of-bounds cars itself
+        # (pc_controller/deadzone.py then only supervises it).
+        self.handles_unseen = bool(getattr(module, "HANDLES_UNSEEN", False))
         n = int(manifest["num_pursuers"])
         metrics_path = model_dir / "metrics.json"
         metrics = json.loads(metrics_path.read_text(encoding="utf-8")) if metrics_path.exists() else {}
@@ -118,22 +121,34 @@ class HiveLoop:
             s.reset()
         self._last_t = None
 
+    def recovery_status(self) -> tuple[list[bool], list[bool]]:
+        """(recovering, gave_up) per pursuer, as the runtime reported on its last step."""
+        last = getattr(self.runtime, "last", None) or {}
+        n = len(self._speeds) - 1
+        return (list(last.get("recovering") or [False] * n), list(last.get("gave_up") or [False] * n))
+
     def tick(self, *, pursuer_poses: list[VehiclePose], evader_pose: VehiclePose,
-             tracker: LatencyTracker | None = None) -> np.ndarray:
+             tracker: LatencyTracker | None = None, seen: list[bool] | None = None) -> np.ndarray:
+        """seen: one bool per pursuer, then the evader (None = all seen). A vehicle that is not
+        seen must come in at its LAST SEEN pose (pose_stream does that); it keeps its last speed."""
         tracker = tracker or LatencyTracker()
         tracker.mark("pose_ingested")
         poses = list(pursuer_poses) + [evader_pose]
         if len(poses) != len(self._speeds):
             raise ValueError(f"expected {len(self._speeds) - 1} pursuer poses, got {len(pursuer_poses)}")
-        for speed, pose in zip(self._speeds, poses):
-            speed.update(pose)
+        for i, (speed, pose) in enumerate(zip(self._speeds, poses)):
+            if seen is None or seen[i]:
+                speed.update(pose)
         state = np.array([[p.x, p.y, p.heading, s.v] for p, s in zip(poses, self._speeds)], dtype=np.float64)
-        t = evader_pose.timestamp_s
+        # The newest pose time in the frame. Not the evader's: a held or lost vehicle keeps its
+        # own older capture time, and the step must not shrink because of it.
+        t = max(p.timestamp_s for p in poses)
         # The model was trained at a fixed 0.1 s step; a real tick is close to that.
         dt = 0.1 if self._last_t is None else min(max(t - self._last_t, 0.02), 0.5)
-        self._last_t = t
+        self._last_t = max(t, self._last_t or t)
         tracker.mark("observation_built")
-        action = np.asarray(self.runtime.step(state[:-1], state[-1], dt=dt), dtype=np.float64).reshape(-1)
+        kw = {"seen": list(seen)} if (seen is not None and self.handles_unseen) else {}
+        action = np.asarray(self.runtime.step(state[:-1], state[-1], dt=dt, **kw), dtype=np.float64).reshape(-1)
         tracker.mark("action_computed")
         self.latency_budget.record(tracker.finish())
         return action

@@ -30,6 +30,50 @@ def test_pose_from_marker_center_and_heading():
     assert abs(heading - math.pi / 2) < 1e-6  # up in image = +y in arena here
 
 
+def test_frame_builder_reports_a_lost_vehicle_instead_of_going_silent():
+    from hive_perception.core.frame_builder import FrameBuilder
+
+    fb = FrameBuilder(pursuer_ids=[1], evader_id=0, hold_max_age_s=0.25, evader_hold_max_age_s=1.0,
+                      report_lost=True)
+    assert fb.build_frame(10.0) is None                      # nothing seen yet: silence
+    fb.update({1: (1.18, 0.4, 0.1)}, 10.0)
+    assert fb.build_frame(10.0) is None                      # the evader has never been seen: silence
+    fb.update({0: (0.0, 0.1, 0.2)}, 10.0)
+    frame = json.loads(fb.build_frame(10.0))
+    assert frame["pursuers"][0] == {"x": 1.18, "y": 0.4, "heading": 0.1} and "t" not in frame["evader"]
+
+    fb.update({0: (0.0, 0.1, 0.2)}, 10.2)                    # the car missed for 0.2 s: held, with its own time
+    held = json.loads(fb.build_frame(10.2))
+    assert held["t"] == 10.2 and held["pursuers"][0]["x"] == 1.18 and held["pursuers"][0]["t"] == 10.0
+
+    fb.update({0: (0.0, 0.1, 0.2)}, 10.6)                    # 0.6 s: lost, no pose, where it was last seen
+    lost = json.loads(fb.build_frame(10.6))
+    car = lost["pursuers"][0]
+    assert car["x"] is None and car["y"] is None and car["heading"] is None
+    assert abs(car["lost_s"] - 0.6) < 1e-6 and car["last"] == {"x": 1.18, "y": 0.4, "heading": 0.1}
+    assert lost["evader"]["x"] == 0.0 and fb.missing_ids(10.6) == [1]
+
+    # the evader is held longer than a car: 0.9 s old is still a pose, 1.1 s is lost
+    assert json.loads(fb.build_frame(11.5))["evader"]["x"] == 0.0
+    both = json.loads(fb.build_frame(11.8))
+    assert both["evader"]["x"] is None and both["pursuers"][0]["x"] is None
+    assert both["t"] == 11.8                                 # nothing fresh: a heartbeat stamped now
+
+    # an older controller cannot parse a lost vehicle, which stalls it: the old, safe behaviour
+    import pytest
+    with pytest.raises((TypeError, ValueError)):
+        float(car["x"])
+
+
+def test_frame_builder_stays_silent_about_a_lost_vehicle_unless_asked_to_report_it():
+    from hive_perception.core.frame_builder import FrameBuilder
+
+    fb = FrameBuilder(pursuer_ids=[1], evader_id=0, hold_max_age_s=0.25)      # the ROS path's default
+    fb.update({1: (0.0, 0.0, 0.0), 0: (0.5, 0.5, 0.0)}, 5.0)
+    assert fb.build_frame(5.1) is not None and "t" not in json.loads(fb.build_frame(5.1))["pursuers"][0]
+    assert fb.build_frame(5.3) is None
+
+
 def test_frame_builder_schema_and_staleness():
     fb = FrameBuilder(pursuer_ids=[0], evader_id=1, hold_max_age_s=0.25)
     fb.update({0: (1.0, -2.0, 0.5), 1: (3.0, 1.0, -1.2)}, t=10.0)

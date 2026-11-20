@@ -52,6 +52,17 @@ calibration_corner_ids: [10, 11, 12, 13]
 # weights each tag corner by it, and the scan checks the arena scale against it.
 corner_tag_m: 0.16
 
+# How high the vehicle tags ride above the floor, metres. The arena frame is fitted on the FLOOR,
+# so a tag on a roof reads further from the camera than the car is: height / camera height of the
+# distance to the camera (9 cm up, camera 1.6 m up, car 3.5 m away: 20 cm), outward on the far
+# side of the arena, in opposite directions for the two cameras. Set it and each camera's poses are
+# corrected (needs the lens matrix `arena scan` measures; the vision log says where it places each
+# camera, check that against the rig). 0 or unset = not corrected, the behaviour until 2026-11-19.
+# Measure it with a ruler: floor to the top face of the tag. Check it worked on the dashboard:
+# the two cameras' disagreement on a car both see ("spread") should drop to 1-2 cm.
+# vehicle_tag_height_m: 0.09
+# evader_tag_height_m: 0.09      # only if the evader's tag sits at another height
+
 # Sheets to PRINT but never track (spares). None right now: every printed
 # vehicle sheet is in the fleet above.
 extra_print_ids: []

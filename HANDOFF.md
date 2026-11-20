@@ -1,4 +1,6 @@
-> **Latest handoff (2026-11-18):** [docs/handoff/2026-11-18-tag-dropouts.md](docs/handoff/2026-11-18-tag-dropouts.md) - runs end when a tag drops out; the discussion, the telemetry and the recommended fixes.
+> **Latest handoff (2026-11-19):** [docs/handoff/2026-11-19-dead-zone.md](docs/handoff/2026-11-19-dead-zone.md) - a car past the tape or out of the cameras' view is brought back instead of ending the run; settings and the checks to run on the rig. Not yet run on the real cars.
+>
+> Before it (2026-11-18): [docs/handoff/2026-11-18-tag-dropouts.md](docs/handoff/2026-11-18-tag-dropouts.md) - runs end when a tag drops out; the discussion, the telemetry and the recommended fixes.
 
 # Handoff — planned camera work
 

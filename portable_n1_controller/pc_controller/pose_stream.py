@@ -82,7 +82,8 @@ def parse_pose_frame_meta(raw: bytes | str, *, expected_pursuers: int) -> tuple[
     return pursuers, evader, {"seq": None if seq is None else int(seq),
                               "lat": None if lat is None else float(lat),
                               "t": float(frame["t"]), "seen": seen, "lost_s": lost_s,
-                              "arena": frame.get("arena")}
+                              "arena": frame.get("arena"),
+                              "now": None if frame.get("now") is None else float(frame["now"])}
 
 
 class UdpPoseSource:

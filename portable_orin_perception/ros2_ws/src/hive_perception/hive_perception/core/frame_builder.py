@@ -255,6 +255,11 @@ class FrameBuilder:
             "pursuers": entries[:-1],
             "evader": entries[-1],
         }
+        if self.report_lost:
+            # The clock every age in this frame is measured against (the capture time of the camera
+            # frame that produced it). "t" is only the newest POSE: when nothing was detected on
+            # the newest frames it is itself a held time, and the controller could not tell.
+            payload["now"] = now_t
         if extra:
             for key, value in extra.items():
                 payload.setdefault(key, value)

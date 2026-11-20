@@ -475,8 +475,9 @@ class Hub:
         A car that passes the tape or leaves the cameras' view no longer ends the run
         (2026-11-19): the controller brings it back (pc_controller/deadzone.py) and reports that
         in its telemetry ("deadzone"). The run ends when the controller gives a car up (blind
-        for about 3 s). A controller that does not report "deadzone" (older code) gets the
-        old rule: disarm the moment a car's centre is past the tape."""
+        for 3 to 4.5 s, or 12 s in recovery). A controller that does not report "deadzone" (older
+        code), or reports mode "stop-only" (no recovery for this model), gets the old rule:
+        disarm the moment a car's centre is past the tape."""
         t0, bad_since, reason = time.time(), None, None
         while gen == self._watch_gen:
             time.sleep(0.1)
@@ -496,7 +497,9 @@ class Hub:
                 hw, hh = ((v or {}).get("arena") or [0.915, 0.915])[:2]
                 dz = c.get("deadzone")
                 for i, q in enumerate(poses.get("pursuers") or []):
-                    if dz is None:
+                    if dz is None or dz.get("mode") == "stop-only":
+                        # nothing brings this car back (older controller, or a model / setting with
+                        # no recovery): the run still ends the moment it is past the tape
                         if abs(q[0]) > hw + 0.005 or abs(q[1]) > hh + 0.005:
                             reason = f"car left the arena ({q[0]:.2f}, {q[1]:.2f})"
                     elif i < len(dz.get("gave_up") or []) and dz["gave_up"][i]:

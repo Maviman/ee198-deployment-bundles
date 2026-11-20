@@ -144,7 +144,8 @@ class HiveLoop:
         # own older capture time, and the step must not shrink because of it.
         t = max(p.timestamp_s for p in poses)
         # The model was trained at a fixed 0.1 s step; a real tick is close to that.
-        dt = 0.1 if self._last_t is None else min(max(t - self._last_t, 0.02), 0.5)
+        # No pose newer than the last tick's (every vehicle held or lost): the trained step.
+        dt = 0.1 if (self._last_t is None or t <= self._last_t) else min(max(t - self._last_t, 0.02), 0.5)
         self._last_t = max(t, self._last_t or t)
         tracker.mark("observation_built")
         kw = {"seen": list(seen)} if (seen is not None and self.handles_unseen) else {}

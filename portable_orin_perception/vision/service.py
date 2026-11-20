@@ -312,7 +312,7 @@ class VisionService:
             if s.localizer.vehicle_px_range:
                 lo, hi = s.localizer.vehicle_px_range
                 self.log(f"camera {s.index}: expected vehicle tag size {lo:.1f}-{hi:.1f} px")
-            tag_h = self.marker_map.vehicle_tag_height_m
+            tag_h = max(self.marker_map.tag_height_m(v) for v in self.vehicle_ids)
             if tag_h > 0.0 and s.localizer.camera_xyz is not None:
                 cx, cy, cz = s.localizer.camera_xyz
                 far = max(math.hypot(cx - sx * self.half[0], cy - sy * self.half[1]) for sx in (-1, 1) for sy in (-1, 1))

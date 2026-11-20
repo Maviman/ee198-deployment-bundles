@@ -302,6 +302,12 @@ def run_realtime(loop, link, *, pose_port: int, tick_hz: float = 10.0, stall_s: 
                         manual = None
                         log("MANUAL DRIVE ended: armed by operator")
                     armed = True
+                    # A run starts clean: speeds, the model's memory and above all the recovery's
+                    # memory of "commands sent" (while disarmed none were) are from before.
+                    loop.reset()
+                    dead.reset()
+                    if hold is not None:
+                        hold.reset()
                     log("ARMED by operator")
                 elif cmd == "disarm":
                     if armed:
@@ -426,10 +432,12 @@ def run_realtime(loop, link, *, pose_port: int, tick_hz: float = 10.0, stall_s: 
                 action = loop.tick(pursuer_poses=pursuers, evader_pose=evader, seen=seen)
             else:
                 action = loop.tick(pursuer_poses=pursuers, evader_pose=evader)
+            model_action = action
             if hold is not None:
                 action = hold.apply(action, pursuers, evader, log)
             # Last: a recovering car's command replaces whatever the model or the hold zone said.
-            action = dead.apply(action, pursuers, evader, seen, lost_s, log)
+            action = dead.apply(action, pursuers, evader, seen, lost_s, log, raw=model_action,
+                                sending=armed and manual is None)
             last_seen = None if seen is None else [bool(s) for s in seen]
             t_done = time.perf_counter()
             if link is not None and manual is None:

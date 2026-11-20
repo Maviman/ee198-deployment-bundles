@@ -611,3 +611,14 @@ def test_facing_outward_near_the_edge_is_shown_but_does_not_block_start(rig):
     chk = next(c for c in rd["checks"] if c["name"].startswith("car faces inward"))
     assert chk["ok"] is False and chk["advisory"] is True and "allowed" in chk["detail"]
     assert rd["ok"] is True, "any start pose is the operator's call"
+
+
+def test_a_controller_that_can_only_stop_a_lost_car_still_ends_the_run_at_the_tape(rig):
+    # mode "stop-only": an older model, or recovery switched off. Nothing would bring the car back.
+    r = rig()
+    r.control["deadzone"] = dict(DEADZONE, mode="stop-only")
+    assert r.post("/api/arm")[0] == 200
+    time.sleep(0.4)
+    r.control["poses"]["pursuers"] = [[-1.05, 0.1, 3.1]]
+    time.sleep(0.6)
+    assert "disarm" in r.fc.cmds and "left the arena" in r.state()["run"]["halt_reason"]

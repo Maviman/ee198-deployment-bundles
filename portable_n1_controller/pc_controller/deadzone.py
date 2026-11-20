@@ -85,7 +85,11 @@ LEAD_FLIP_COS = 0.34        # the lead end changes only when the centre is > 110
 ENTER_OUTSIDE_M = 0.05      # m past the tape (seen) at which recovery takes over
 REJOIN_INSIDE_M = 0.20      # m inside the tape (both axes, seen) at which the model gets the car back
 BLIND_AFTER_S = 0.30        # s unseen, anywhere, after which the blind recovery starts
-BLIND_STALE_S = 1.0         # s unseen after which a car its runtime is NOT recovering is stopped
+BLIND_STALE_S = 0.5         # s unseen after which a car its runtime is NOT recovering is stopped (the
+                            # runtime goes on driving it on its frozen pose, as in training, where gaps are short)
+RECOVERY_MAX_S = 12.0       # s in recovery, seen or not, after which the car is given up (a car seen one
+                            # tick in three never counts 3 s blind and never gets 0.3 m inside: review 2026-11-19)
+BLIND_BRAKE_MAX_S = 0.8     # s: the longest blind brake
 EVADER_BLIND_S = 3.0        # s unseen (perception's own hold included) up to which a runtime that
                             # handles unseen cars may go on without the evader
 BINARY_PULSE = 0.40         # throttle sent on an "on" tick in binary-drive mode (>= the 1/3 cut)
@@ -109,7 +113,10 @@ def fresh_seen(pursuers, evader, meta: dict, fresh_s: float = FRESH_S) -> tuple[
     if seen is None:
         return None, None
     lost = list(meta.get("lost_s") or [0.0] * len(seen))
-    t = meta.get("t")
+    # "now" on perception's capture clock (the camera frame that produced this pose frame). "t" is
+    # only the newest pose IN the frame: with no vehicle freshly seen it is itself a held time, and
+    # a frozen pose would count as fresh against it (review 2026-11-19). Older perception: "t".
+    t = meta.get("now") if meta.get("now") is not None else meta.get("t")
     out = [bool(s) for s in seen]
     if t is not None:
         for i, pose in enumerate(pursuers):
@@ -214,12 +221,11 @@ class EdgeRecovery:
                 return self.rp_dir * self.low_throttle, 0.0
             return 0.0, 0.0                                    # wait to be seen
         h_thr, h_steer, h_v = self.hist[self.rp_idx]
-        if abs(h_v) > 0.05:
-            moved = math.copysign(1.0, h_v)
-        elif abs(h_thr) >= self.spec.deadband:
-            moved = math.copysign(1.0, h_thr)
-        else:
-            moved = 0.0
+        # Only a tick in which the car was MEASURED moving is retraced. (The 3-car recovery also
+        # trusts the throttle of a standing tick; here that replayed commands a standing car never
+        # executed: review 2026-11-19.)
+        moved = math.copysign(1.0, h_v) if abs(h_v) > 0.05 else 0.0
+        _ = h_thr
         need = min(max(int(math.ceil(abs(h_v) / DRIVE_IN_MPS)), 1), REPLAY_HOLD_MAX)
         self.rp_hold += 1
         if self.rp_hold >= need:
@@ -262,11 +268,13 @@ class EdgeRecovery:
 
     # -- one control tick ---------------------------------------------------------------------
     def step(self, x: float, y: float, yaw: float, v: float, seen: bool, cmd_in,
-             unseen_s: float | None = None) -> tuple[float, float]:
+             unseen_s: float | None = None, record: bool = True) -> tuple[float, float]:
         """The command to send this tick: `cmd_in` (throttle, steer) unless the car is recovering.
         When not seen, x / y / yaw / v are ignored (the last seen values are used). unseen_s:
         how long the cameras have not seen it, when the caller knows (the pose stream's lost_s,
-        which includes perception's own hold time); otherwise counted here in ticks."""
+        which includes perception's own hold time); otherwise counted here in ticks. record
+        False: the returned command will NOT reach the car (disarmed, manual drive): nothing is
+        remembered for a replay, and what was remembered is dropped (the car may be moved by hand)."""
         dt, half = self.dt, self.spec.half_m
         if seen or self.last is None:
             self.last = (float(x), float(y), float(yaw), float(v))
@@ -292,15 +300,20 @@ class EdgeRecovery:
         inside = (half - max(abs(lx), abs(ly))) >= REJOIN_INSIDE_M
         if enter:
             self.recovering, self.stopped, self.lead = True, False, 0
+            # The replay starts at the newest remembered tick and keeps its place for the whole
+            # recovery: a second blind spell goes on from where the first stopped, it does not
+            # retrace the same ground again. The extra stretch is never longer than the memory.
+            self.rp_idx = self.rp_hold = 0
+            self.rp_dir = 0.0
+            self.rp_extra = min(int(round(REPLAY_EXTRA_S / dt)), len(self.hist))
         elif self.recovering and seen and inside:
             self.recovering, self.stopped, self.lead = False, False, 0
+            self.hist.clear()                                  # that track is behind it now
 
         blind = self.recovering and not seen
-        if blind and (not self.blind or enter):                # the first blind tick of this recovery
+        if blind and (not self.blind or enter):                # the first tick of a blind spell
             ticks = int(math.ceil(abs(ev) / (BRAKE_PLAN_MPS2 * dt) - 1e-6)) if abs(ev) > 0.1 else 0
-            self.brake_left = min(max(ticks, 0), 8)
-            self.rp_idx = self.rp_hold = 0
-            self.rp_dir, self.rp_extra = 0.0, int(round(REPLAY_EXTRA_S / dt))
+            self.brake_left = min(max(ticks, 0), int(round(BLIND_BRAKE_MAX_S / dt)))
             self.t_blind = 0.0
         self.blind = blind
         self.gave_up = blind and self.t_blind >= GIVE_UP_S - 0.5 * dt
@@ -321,7 +334,11 @@ class EdgeRecovery:
                 self.dr[2] = math.copysign(max(abs(ev) - BRAKE_PLAN_MPS2 * dt, 0.0), ev)      # braking
             elif abs(cmd[0]) < self.spec.deadband:
                 self.dr[2] = math.copysign(max(abs(ev) - COAST_MPS2 * dt, 0.0), ev)           # coasting
-        if seen:                                               # history: seen ticks only
+        # History: the commands SENT while the car was seen and the model was driving it. Not the
+        # recovery's own (replaying the drive back in backwards would move the car OUT again).
+        if not record:
+            self.hist.clear()
+        elif seen and not self.recovering:
             self.hist.insert(0, (cmd[0], cmd[1], lv))
             del self.hist[self.steps:]
         return cmd
@@ -399,6 +416,7 @@ class DeadZone:
         self.gave_up = [False] * n
         self.blind = [False] * n
         self.guarding = [False] * n             # the edge brake is overriding the model's throttle
+        self.rec_s = [0.0] * n                  # s each car has been in recovery, seen or not
         self.evader_unseen_s = 0.0
         self.evader_hold = False
         self._sd = [0.0] * n                    # sigma-delta remainder per car (binary drive)
@@ -420,11 +438,17 @@ class DeadZone:
             return math.copysign(self.min_throttle, thr)
         return thr
 
-    def apply(self, action, pursuers, evader, seen, lost_s=None, log=None):
+    def apply(self, action, pursuers, evader, seen, lost_s=None, log=None, *, raw=None, sending=True):
         """`action` (throttle, steer per pursuer) as it should be SENT. `seen`: one bool per
         pursuer, then the evader (None = everything seen); `lost_s`: the pose stream's seconds
         since each was last seen, in the same order. Returns `action` itself when nothing is
-        overridden, otherwise a copy."""
+        overridden, otherwise a copy.
+
+        raw: the model's own output when `action` has already been through the hold zone (which
+        zeroes a car near the evader): a car its runtime is recovering gets the runtime's command,
+        not the hold zone's zero. sending False: the result will not reach the cars (disarmed,
+        manual drive), so nothing is remembered for a replay."""
+        raw = action if raw is None else raw
         n = self.n
         seen = [True] * (n + 1) if seen is None else [bool(s) for s in seen]
         lost_s = [0.0] * (n + 1) if lost_s is None else [float(x) for x in lost_s]
@@ -438,19 +462,32 @@ class DeadZone:
                 out = np.array(action, dtype=np.float64)
             out[2 * i], out[2 * i + 1] = thr, steer
 
+        # The evader first. Without it there is nothing to chase: every car stands still, armed.
+        # In controller mode the stand-still is the INPUT of the car's recovery / edge brake, not
+        # an override of it: a car too fast to stop before the tape is still braked.
+        self.evader_unseen_s = 0.0 if seen[n] else max(self.evader_unseen_s + self.dt, lost_s[n])
+        grace = EVADER_BLIND_S if self.runtime_handles_unseen else 0.0
+        hold = (not seen[n]) and self.evader_unseen_s > grace
+        if hold != self.evader_hold:
+            self.evader_hold = hold
+            if log is not None:
+                log(f"EVADER OUT OF VIEW, last seen ({evader.x:+.2f}, {evader.y:+.2f}): cars standing still, "
+                    f"still armed" if hold else "EVADER BACK: driving again")
+
         for i, pose in enumerate(pursuers):
             was = (self.recovering[i], self.gave_up[i], self.blind[i])
             self.unseen_s[i] = 0.0 if seen[i] else max(self.unseen_s[i] + self.dt, lost_s[i])
             if self.recoveries is not None:
                 r = self.recoveries[i]
                 v = self.speeds[i].update(pose) if seen[i] else self.speeds[i].v
-                thr, steer = r.step(pose.x, pose.y, pose.heading, v, seen[i],
-                                    (action[2 * i], action[2 * i + 1]), unseen_s=lost_s[i])
+                cmd_in = (0.0, 0.0) if hold else (action[2 * i], action[2 * i + 1])
+                thr, steer = r.step(pose.x, pose.y, pose.heading, v, seen[i], cmd_in,
+                                    unseen_s=lost_s[i], record=sending)
                 self.recovering[i], self.gave_up[i], self.blind[i] = r.recovering, r.gave_up, r.blind
                 self.guarding[i] = r.guarding and not r.recovering
                 if r.recovering:
                     put(i, self._shape(i, thr), steer)
-                elif r.guarding:
+                elif r.guarding or hold:
                     put(i, thr, steer)
             elif self.runtime_handles_unseen:
                 rec, gave = bool(rt_rec[i]), bool(rt_gave[i])
@@ -461,36 +498,31 @@ class DeadZone:
                 if stale or self.gave_up[i]:
                     put(i, 0.0, 0.0)
                 elif rec:
-                    put(i, self._shape(i, float(action[2 * i])), float(action[2 * i + 1]))
+                    put(i, self._shape(i, float(raw[2 * i])), float(raw[2 * i + 1]))
+                elif hold:
+                    put(i, 0.0, 0.0)
             else:
                 self.recovering[i] = self.blind[i] = False
                 self.gave_up[i] = not seen[i] and self.unseen_s[i] >= GIVE_UP_S
-                if not seen[i]:
+                if not seen[i] or hold:
                     put(i, 0.0, 0.0)
+            # A recovery that goes on and on (a car seen now and then, never long enough to get
+            # inside or to count as lost) is given up too.
+            self.rec_s[i] = self.rec_s[i] + self.dt if self.recovering[i] else 0.0
+            if self.rec_s[i] >= RECOVERY_MAX_S:
+                self.gave_up[i] = True
+                put(i, 0.0, 0.0)
             if log is not None and (self.recovering[i], self.gave_up[i], self.blind[i]) != was:
                 where = f"last seen ({pose.x:+.2f}, {pose.y:+.2f})"
                 if self.gave_up[i]:
-                    log(f"car {i} LOST: not seen for {self.unseen_s[i]:.1f} s, {where}: stopped")
+                    log(f"car {i} LOST: not seen for {self.unseen_s[i]:.1f} s, in recovery for "
+                        f"{self.rec_s[i]:.1f} s, {where}: stopped")
                 elif self.blind[i]:
                     log(f"car {i} OUT OF VIEW, {where}: blind recovery (brake, then back along its own track)")
                 elif self.recovering[i]:
                     log(f"car {i} PAST THE TAPE at ({pose.x:+.2f}, {pose.y:+.2f}): driving back in")
                 elif was[0] or was[1]:
                     log(f"car {i} BACK at ({pose.x:+.2f}, {pose.y:+.2f}): the model has it again")
-
-        # The evader. Without it there is nothing to chase: every car stands still, armed.
-        self.evader_unseen_s = 0.0 if seen[n] else max(self.evader_unseen_s + self.dt, lost_s[n])
-        grace = EVADER_BLIND_S if self.runtime_handles_unseen else 0.0
-        hold = (not seen[n]) and self.evader_unseen_s > grace
-        if hold != self.evader_hold:
-            self.evader_hold = hold
-            if log is not None:
-                log(f"EVADER OUT OF VIEW, last seen ({evader.x:+.2f}, {evader.y:+.2f}): cars standing still, "
-                    f"still armed" if hold else "EVADER BACK: driving again")
-        if hold:
-            for i in range(n):
-                if not self.recovering[i]:
-                    put(i, 0.0, 0.0)
         return out
 
     def status(self) -> dict:
@@ -499,4 +531,5 @@ class DeadZone:
                 "unseen_s": [round(u, 2) for u in self.unseen_s],
                 "recovering": list(self.recovering), "blind": list(self.blind),
                 "gave_up": list(self.gave_up), "edge_brake": list(self.guarding),
+                "give_up_s": GIVE_UP_S if self.recoveries is not None else 3.0,
                 "evader_unseen_s": round(self.evader_unseen_s, 2), "evader_hold": self.evader_hold}

@@ -396,12 +396,12 @@ def test_the_control_loop_keeps_running_and_recovers_when_perception_reports_a_l
         stream(0.7, lambda el, now: {"x": x0 + 1.2 * el, "y": 0.0, "heading": 0.0}, ev_seen)
         x_last, t_lost = x0 + 1.2 * 0.7, time.perf_counter()
         assert any(s[0] == "cmd" for s in link.sent), "the loop never drove"
-        n_before = len(link.sent)
+        n_before, logs_before = len(link.sent), len(logs)   # (waiting for the first frame can log a stall)
         # 2. perception loses it: frames keep coming, the car marked lost at its last seen pose
         stream(1.2, lambda el, now: {"x": None, "y": None, "heading": None, "lost_s": round(0.25 + el, 3),
                                      "last": {"x": x_last, "y": 0.0, "heading": 0.0}, "t": t_lost}, ev_seen)
         blind = link.sent[n_before:]
-        assert not any("STALLED" in m for m in logs), "a lost car must not stall the pose feed"
+        assert not any("STALLED" in m for m in logs[logs_before:]), "a lost car must not stall the pose feed"
         assert all(s[0] == "cmd" for s in blind), "E-stop packets while the car should be recovering"
         assert any("OUT OF VIEW" in m for m in logs)
         thr = [s[1][0] for s in blind]
@@ -463,13 +463,13 @@ def test_an_older_flat_model_runs_as_before_and_only_stops_a_lost_car():
         drove = [s for s in link.sent if s[0] == "cmd"]
         assert drove and any(abs(v) > 0.05 for s in drove for v in s[1]), "the model's commands must go out"
         assert any("STOPPED until it is seen again" in m for m in logs)
-        n_before = len(link.sent)
+        n_before, logs_before = len(link.sent), len(logs)   # (waiting for the first frame can log a stall)
         t_lost = time.perf_counter()
         stream(0.5, lambda now: {"x": None, "y": None, "heading": None, "lost_s": 0.3,
                                  "last": {"x": -0.5, "y": 0.0, "heading": 0.0}, "t": t_lost})
         after = link.sent[n_before + 1:]
         assert after and all(s == ("cmd", [0.0, 0.0]) for s in after), after[:4]
-        assert not any("STALLED" in m for m in logs)
+        assert not any("STALLED" in m for m in logs[logs_before:])
     finally:
         halt.set()
         th.join(timeout=3.0)
@@ -485,3 +485,87 @@ def test_the_tape_is_taken_from_the_cameras_when_the_taped_square_is_not_the_mod
     assert dead.recovering[0], "1.0 m is past a 6 ft square's tape (0.914 m)"
     rt = DZ.DeadZone(3, spec=SPEC, runtime_handles_unseen=True, runtime_status=lambda: ([False] * 3, [False] * 3))
     assert not rt.set_arena_half(0.9144)                    # a runtime with its own recovery keeps its arena
+
+
+# ----------------------------------------------- regressions from the 2026-11-19 review
+def test_the_evader_going_out_of_view_does_not_cancel_the_edge_brake():
+    dead = DZ.DeadZone(1, spec=SPEC)
+    ev = VehiclePose(0.0, 0.0, 0.0, 0.0)
+    for k in range(4):                                   # 2 m/s toward the right-hand tape
+        dead.apply(np.array([1.0, 0.0]), [VehiclePose(0.2 + 0.2 * k, 0.0, 0.0, 0.1 * k)], ev, [True, True])
+    out = dead.apply(np.array([1.0, 0.0]), [VehiclePose(1.0, 0.0, 0.0, 0.4)], ev, [True, False], [0.0, 1.1])
+    assert dead.evader_hold and out[0] < -0.5, f"expected a brake, got {tuple(out)}"
+    slow = DZ.DeadZone(1, spec=SPEC)                     # a car with room simply stands still
+    out = slow.apply(np.array([1.0, 0.3]), [VehiclePose(0.0, 0.0, 0.0, 0.0)], ev, [True, False], [0.0, 1.1])
+    assert tuple(out) == (0.0, 0.0)
+
+
+def test_commands_that_never_reached_the_car_are_not_replayed():
+    # Disarmed (or manual drive): the model keeps asking for throttle, nothing is sent. Then the
+    # tag drops out. There is no track to retrace: the car must not be driven.
+    dead = DZ.DeadZone(1, spec=SPEC)
+    pose, ev = VehiclePose(0.9, 0.0, math.pi, 0.0), VehiclePose(0.0, 0.0, 0.0, 0.0)
+    for k in range(25):
+        dead.apply(np.array([1.0, 0.0]), [VehiclePose(0.9, 0.0, math.pi, 0.1 * k)], ev, [True, True], sending=False)
+    outs = [dead.apply(np.array([1.0, 0.0]), [pose], ev, [False, True], [0.3 + 0.1 * k, 0.0]) for k in range(40)]
+    assert all(abs(o[0]) < 1e-9 for o in outs), "replayed commands that were never sent"
+    # the same while standing still under a hold (armed, sent zeros, the model asking for more)
+    dead = DZ.DeadZone(1, spec=SPEC)
+    for k in range(25):
+        dead.apply(np.array([1.0, 0.0]), [VehiclePose(0.9, 0.0, math.pi, 0.1 * k)], ev, [True, False], [0.0, 2.0])
+    outs = [dead.apply(np.array([1.0, 0.0]), [pose], ev, [False, True], [0.3 + 0.1 * k, 0.0]) for k in range(40)]
+    assert all(abs(o[0]) < 1e-9 for o in outs)
+
+
+def test_a_second_blind_spell_never_drives_the_car_further_out():
+    # Out of view, back in view for a moment (driving back in), out of view again: the replay
+    # must not run the drive-back-in backwards.
+    car = SimCar(-0.6, 0.2, 0.0)
+    dead = DZ.DeadZone(1, spec=SPEC, guard=False)
+    evader, last, last_t, flick, peak, after = VehiclePose(0.0, 0.0, 0.0, 0.0), None, 0.0, 0, 0.0, []
+    for k in range(120):
+        t = 0.1 * k
+        visible = car.in_view and not (flick and 0 < t - flick < 1.5)   # a camera gap right after it reappears
+        if visible:
+            last, last_t = VehiclePose(car.x, car.y, car.yaw, t), t
+        seen_l, lost_l = DZ.fresh_seen([last], evader, {"now": t, "t": t, "seen": [t - last_t <= 0.25, True],
+                                                        "lost_s": [max(t - last_t, 0.0), 0.0]})
+        out = dead.apply(np.array([1.0, 0.0]), [last], evader, seen_l, lost_l)
+        if dead.blind[0] and not flick and car.outside_m > 0:
+            peak = max(peak, car.outside_m)
+        if peak and not flick and seen_l[0] and dead.recovering[0]:
+            flick = t                                                  # seen again: now hide it for 1.5 s
+        if flick and 0 < t - flick < 1.5:
+            after.append(car.outside_m)
+        car.step(float(out[0]), float(out[1]))
+    assert flick and after, "the scenario never happened"
+    assert max(after) <= after[0] + 0.05, f"moved {max(after) - after[0]:.2f} m further out during the second blind spell"
+
+
+def test_a_frozen_pose_is_not_fresh_just_because_nothing_else_is_fresh_either():
+    pose, ev = VehiclePose(1.0, 0.0, 0.0, 10.0), VehiclePose(0.0, 0.0, 0.0, 9.5)
+    # perception holds the car (0.2 s old) and the evader; the frame's "t" is the car's own time
+    meta = {"t": 10.0, "now": 10.2, "seen": [True, True], "lost_s": [0.0, 0.0]}
+    seen, lost = DZ.fresh_seen([pose], ev, meta)
+    assert seen == [False, True] and abs(lost[0] - 0.2) < 1e-9
+    assert DZ.fresh_seen([pose], ev, {"t": 10.0, "seen": [True, True]})[0] == [True, True]   # older perception
+
+
+def test_a_recovery_that_never_ends_is_given_up():
+    dead = DZ.DeadZone(1, spec=SPEC)
+    ev = VehiclePose(0.0, 0.0, 0.0, 0.0)
+    out = None
+    for k in range(int(DZ.RECOVERY_MAX_S / 0.1) + 5):     # seen, standing past the tape, never getting in
+        out = dead.apply(np.zeros(2), [VehiclePose(HALF + 0.1, 0.0, 0.0, 0.1 * k)], ev, [True, True])
+    assert dead.gave_up[0] and tuple(out) == (0.0, 0.0)
+
+
+def test_the_hold_zone_does_not_cancel_a_runtimes_own_recovery_command():
+    dead = DZ.DeadZone(3, spec=SPEC, runtime_handles_unseen=True,
+                       runtime_status=lambda: ([True, False, False], [False] * 3))
+    poses = [VehiclePose(HALF + 0.1, 0.0, 0.0, 0.0), VehiclePose(0.0, 0.3, 0.0, 0.0), VehiclePose(0.0, -0.3, 0.0, 0.0)]
+    raw = np.array([-0.3, 0.2, 0.5, 0.0, 0.5, 0.0])
+    held = raw.copy()
+    held[0:2] = 0.0                                       # the hold zone zeroed car 0 (it is near the evader)
+    out = dead.apply(held, poses, VehiclePose(HALF, 0.0, 0.0, 0.0), [True] * 4, raw=raw)
+    assert tuple(out[0:2]) == (-0.3, 0.2)

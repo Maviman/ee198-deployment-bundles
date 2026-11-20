@@ -607,7 +607,9 @@ function drawMap() {
     g.restore();
     g.fillStyle = "#d6dde6"; g.font = "13px system-ui"; g.fillText(car.label, X(car.x) + 12, Y(car.y) - 10);
   }
-  if (c && c.dist) $("mapsub").textContent = "distance to evader: " + c.dist.map((d) => d.toFixed(2) + " m").join(", ")
+  if (c && fresh("control") && c.deadzone && c.deadzone.evader_hold)
+    $("mapsub").textContent = `EVADER OUT OF VIEW for ${c.deadzone.evader_unseen_s} s: every car stands still (still armed) until the cameras see it again`;
+  else if (c && c.dist) $("mapsub").textContent = "distance to evader: " + c.dist.map((d) => d.toFixed(2) + " m").join(", ")
     + (c.hold_radius ? ` · green ring = hold zone (${c.hold_radius.toFixed(2)} m): a car inside it stands still`
        : c.capture_radius ? ` · dashed ring = the policy's capture radius (${c.capture_radius.toFixed(2)} m)` : "");
 }
@@ -701,7 +703,9 @@ function render() {
   $("readysub").textContent = armedNow ? "ARMED" : rd.ok ? "all green" : "not ready";
   $("readysub").className = "sub " + (armedNow ? "ok" : rd.ok ? "ok" : "warn");
   $("runinfo").textContent = armedNow
-    ? `Running: stops by itself after ${run.cap_s} s (${Math.ceil(run.remaining_s ?? 0)} s left), if a car stays out of the cameras' view for 3 s, or if the pose feed is lost. A car that passes the tape is driven back in. STOP ends it at once.`
+    ? `Running: stops by itself after ${run.cap_s} s (${Math.ceil(run.remaining_s ?? 0)} s left), ${c && c.deadzone && c.deadzone.mode !== "stop-only"
+          ? `if a car stays out of the cameras' view for ${c.deadzone.give_up_s || 3} s, or if the pose feed is lost. A car that passes the tape is driven back in.`
+          : "if the car leaves the arena, or if the pose feed is lost."} STOP ends it at once.`
     : (run.halt_reason ? `Last run ended: ${run.halt_reason}.` : "")
       + (rd.hold_radius ? ` Hold zone ${rd.hold_radius} m: the car stands still inside it and keeps tracking.`
          : c ? " Hold zone is OFF: the car keeps driving at any distance from the evader." : "")
